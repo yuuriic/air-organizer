@@ -94,9 +94,8 @@ const EXTRACT_LISTING_SCRIPT = String.raw`(() => {
     const ellipsis = (k) => k.tagName === 'SPAN' && /^(\.\.\.|…)$/.test(text(k));
     return kids.length >= 3 && kids.every((k) => k.tagName === 'BUTTON' || ellipsis(k)) && /^[\d\s.…]+$/.test(text(d)) && /\d/.test(text(d));
   });
-  const active = pagers.length === 1
-    ? Array.from(pagers[0].children).filter((b) => /^\d+$/.test(text(b)) && b.classList.contains('bg-primary'))
-    : [];
+  const numbered = pagers.length === 1 ? Array.from(pagers[0].children).filter((b) => b.tagName === 'BUTTON' && /^\d+$/.test(text(b))) : [];
+  const active = numbered.filter((b) => b.classList.contains('bg-primary'));
   return {
     found: true,
     headers,
@@ -107,6 +106,8 @@ const EXTRACT_LISTING_SCRIPT = String.raw`(() => {
     typeFilter: filters.length === 1 ? filters[0] : filters.length > 1 ? filters.join(' | ') : undefined,
     searchActive: searches.some((i) => i.value.trim() !== ''),
     pageIndicator: pageMatch ? pageMatch[0] : active.length === 1 ? 'página ativa ' + text(active[0]) : undefined,
+    // Botões numéricos visíveis (as reticências são <span> e nunca entram aqui).
+    visiblePages: numbered.length > 0 ? numbered.map((b) => Number(text(b))) : undefined,
   };
 })()`;
 
@@ -122,6 +123,7 @@ type ExtractionResult =
       typeFilter?: string;
       searchActive?: boolean;
       pageIndicator?: string;
+      visiblePages?: number[];
     };
 
 export class ListingNotFoundError extends Error {
@@ -131,7 +133,9 @@ export class ListingNotFoundError extends Error {
   }
 }
 
-export async function extractListing(page: Page): Promise<PageSnapshot & { headers: string[]; folderTitle?: string }> {
+export type Listing = PageSnapshot & { headers: string[]; folderTitle?: string; visiblePages?: number[] };
+
+export async function extractListing(page: Page): Promise<Listing> {
   const result = (await page.evaluate(EXTRACT_LISTING_SCRIPT)) as ExtractionResult;
   if (!result.found) throw new ListingNotFoundError();
   return {
@@ -143,5 +147,6 @@ export async function extractListing(page: Page): Promise<PageSnapshot & { heade
     typeFilter: result.typeFilter,
     searchActive: result.searchActive,
     pageIndicator: result.pageIndicator,
+    ...(result.visiblePages ? { visiblePages: result.visiblePages } : {}),
   };
 }

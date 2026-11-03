@@ -13,7 +13,9 @@ import { RADIX_CHEVRON_RIGHT_PATH } from '../../src/air/navigator.js';
  * - tipo na coluna sem cabeçalho: pasta = <svg class="lucide-folder">, arquivo = <img alt="pdf icon">;
  *   na coluna Status, arquivos têm ícones "file-search"/"file-check" (não indicam o tipo);
  * - clique na linha de pasta navega; na linha de ARQUIVO abre um diálogo (visualizador editável);
- * - estrela, compartilhar, checkbox, menu "⋮" e menu "More" registram cliques proibidos.
+ * - estrela, compartilhar, checkbox, menu "⋮", menu "More" e reticências do paginador registram cliques proibidos;
+ * - ganchos de teste: window.__cfg (mutar a árvore entre leituras), window.__nextStep
+ *   ("próxima" defeituoso que avança N páginas) e window.__pageOffset (botão numérico defeituoso).
  */
 /** `pathOverride`: "Caminho" exibido na linha, quando diferente do da pasta (anomalia observada no AIR real). */
 export type TreeNode = { id: string; name: string; type: 'folder' | 'file'; children?: TreeNode[]; pathOverride?: string };
@@ -31,6 +33,23 @@ export type TreeFixtureOptions = {
   typeFilter?: string;
   search?: string;
   renderDelayMs?: number;
+  /** Trocar de página cria entrada no histórico (hipótese para o return-failed real da POC-01E). */
+  pagingPushesHistory?: boolean;
+  /* Causas possíveis de identidade não confirmada após o clique (investigação POC-01E): */
+  /** Clicar nestas pastas não navega (URL não muda). */
+  inertRows?: string[];
+  /** Título exibido diferente do nome da linha, por id. */
+  titleOverride?: Record<string, string>;
+  /** Breadcrumb trunca nomes longos no texto (não só no CSS): N caracteres + "…". */
+  breadcrumbTruncateAt?: number;
+  /** Atraso só ao abrir estas pastas: URL muda antes, título e linhas chegam depois. */
+  slowOpen?: Record<string, number>;
+  /** Ao abrir a pasta da chave, o item do valor some do pai dele (alteração durante a leitura, ADR-013). */
+  mutateOnVisit?: Record<string, string>;
+  /** O "voltar" do cabeçalho mantém a página corrente (comportamento observado no AIR real, POC-01E). */
+  retainPageOnBack?: boolean;
+  /** O "voltar" do cabeçalho exibe o pai nesta página (1-based), qualquer que seja a anterior. */
+  backLandsOnPage?: number;
 };
 
 const ICON = {
@@ -62,6 +81,7 @@ export function airTreeHtml(options: TreeFixtureOptions): string {
 <div id="dialog-slot"></div>
 <script>
   const cfg = ${config};
+  window.__cfg = cfg;
   window.__forbiddenClicks = [];
   window.__navClicks = [];
   window.__visits = [];
@@ -81,10 +101,10 @@ export function airTreeHtml(options: TreeFixtureOptions): string {
   document.getElementById('bulk').addEventListener('click', forbid('bulk'));
 
   const svgBtn = (id, d) => '<button id="' + id + '" class="h-8 w-8 p-0"><svg width="15" height="15" viewBox="0 0 15 15" class="h-4 w-4"><path d="' + d + '"></path></svg></button>';
-  // Como no AIR real: até 4 páginas, todos os números; acima disso, 1, 2, a atual, "..." e a última.
+  // Como no AIR real (POC-01E, pasta de 50 páginas): a primeira, a atual e as vizinhas, e a última,
+  // com "..." nas lacunas — página 1: [1][2][...][50]; página 4: [1][...][3][4][5][...][50].
   function numbers(pages) {
-    if (pages <= 4) return Array.from({ length: pages }, (_, i) => i + 1);
-    const shown = [...new Set([1, 2, page + 1, pages])].sort((a, b) => a - b);
+    const shown = [...new Set([1, page, page + 1, page + 2, pages])].filter((n) => n >= 1 && n <= pages).sort((a, b) => a - b);
     return shown.flatMap((n, i) => (i && n - shown[i - 1] > 1 ? [null, n] : [n]));
   }
   function currentId() { const m = location.pathname.match(/my-air\\/([^/]+)$/); return m ? m[1] : cfg.root.id; }
@@ -92,10 +112,14 @@ export function airTreeHtml(options: TreeFixtureOptions): string {
   function go(id) {
     const target = cfg.misrouteTo[id] || id;
     window.__visits.push(target);
+    const victim = (cfg.mutateOnVisit || {})[target];
+    if (victim) { const p = byId.get(parentOf.get(victim)); p.children = p.children.filter((c) => c.id !== victim); }
     history.pushState({}, '', '/air/my-air/' + target);
     page = 0;
-    schedule();
+    const slow = (cfg.slowOpen || {})[target];
+    if (slow) { document.getElementById('rows').innerHTML = ''; setTimeout(render, slow); } else schedule();
   }
+  const crumb = (name) => (cfg.breadcrumbTruncateAt && name.length > cfg.breadcrumbTruncateAt ? name.slice(0, cfg.breadcrumbTruncateAt) + '…' : name);
   function schedule() {
     document.getElementById('rows').innerHTML = '';
     setTimeout(render, cfg.renderDelayMs);
@@ -106,7 +130,7 @@ export function airTreeHtml(options: TreeFixtureOptions): string {
     const kids = node.children || [];
     const path = '/' + chain(node.id).map((n) => n.name).join('/');
     const pages = Math.max(1, Math.ceil(kids.length / cfg.pageSize));
-    document.getElementById('title').textContent = node.name + ' (' + kids.length + ')';
+    document.getElementById('title').textContent = ((cfg.titleOverride || {})[node.id] || node.name) + ' (' + kids.length + ')';
 
     const slot = document.getElementById('crumbs-slot');
     const all = chain(node.id);
@@ -117,8 +141,8 @@ export function airTreeHtml(options: TreeFixtureOptions): string {
       + (a === null
         ? '<li><button type="button" aria-haspopup="menu" class="more"><span role="presentation" aria-hidden="true"><svg></svg><span class="sr-only">More</span></span></button></li>'
         : i === shown.length - 1
-        ? '<li><span role="link" aria-disabled="true" aria-current="page">' + a.name + '</span></li>'
-        : '<li><a data-go="' + a.id + '">' + a.name + '</a></li>')).join('') + '</ol></nav>';
+        ? '<li><span role="link" aria-disabled="true" aria-current="page">' + crumb(a.name) + '</span></li>'
+        : '<li><a data-go="' + a.id + '">' + crumb(a.name) + '</a></li>')).join('') + '</ol></nav>';
     for (const a of slot.querySelectorAll('a[data-go]')) a.addEventListener('click', (e) => { e.preventDefault(); go(a.dataset.go); });
     slot.querySelector('.more')?.addEventListener('click', forbid('breadcrumb-more'));
 
@@ -144,7 +168,7 @@ export function airTreeHtml(options: TreeFixtureOptions): string {
           window.__forbiddenClicks.push('open-file:' + item.name);
           document.getElementById('dialog-slot').innerHTML = '<div role="dialog">Visualizador editável: ' + item.name + '</div>';
         } else {
-          go(item.id);
+          if (!(cfg.inertRows || []).includes(item.id)) go(item.id);
         }
       });
       tr.querySelector('[role="checkbox"]').addEventListener('click', forbid('select-row'));
@@ -160,10 +184,12 @@ export function airTreeHtml(options: TreeFixtureOptions): string {
         : '<button class="h-8 w-8 ' + (n - 1 === page ? 'bg-primary' : 'border') + '">' + n + '</button>').join('')
       + svgBtn('next', cfg.next) + svgBtn('last', cfg.icons.last);
     for (const id of ['first', 'prev', 'last']) pager.querySelector('#' + id).addEventListener('click', forbid(id));
+    pager.querySelectorAll('span').forEach((s) => s.addEventListener('click', forbid('ellipsis')));
     pager.querySelectorAll('button.border, button.bg-primary').forEach((b) => b.addEventListener('click', () => {
       const n = Number(b.textContent);
       window.__navClicks.push('page:' + n);
-      page = n - 1;
+      page = Math.min(pages - 1, n - 1 + (window.__pageOffset || 0));
+      pagingHistory();
       schedule();
     }));
     pager.querySelector('#first').disabled = page === 0;
@@ -171,10 +197,13 @@ export function airTreeHtml(options: TreeFixtureOptions): string {
     pager.querySelector('#last').disabled = page >= pages - 1;
     const next = pager.querySelector('#next');
     next.disabled = page >= pages - 1;
-    next.addEventListener('click', () => { page++; schedule(); });
+    next.addEventListener('click', () => { page = Math.min(pages - 1, page + (window.__nextStep || 1)); pagingHistory(); schedule(); });
   }
+  // Hipótese da POC-01E (return-failed real): trocar de página cria entrada no histórico, mesma URL.
+  function pagingHistory() { if (cfg.pagingPushesHistory) history.pushState({}, '', location.pathname); }
 
-  window.addEventListener('popstate', () => { page = 0; schedule(); });
+  // AIR real (POC-01E): o "voltar" MANTÉM a página corrente (retainPageOnBack). backLandsOnPage força uma página.
+  window.addEventListener('popstate', () => { if (cfg.backLandsOnPage) page = cfg.backLandsOnPage - 1; else if (!cfg.retainPageOnBack) page = 0; schedule(); });
   render();
 </script>
 </body></html>`;

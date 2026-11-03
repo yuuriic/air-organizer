@@ -1,10 +1,10 @@
 import type { Locator, Page } from 'playwright';
-import { pageSignature } from '../core/scanner.js';
+import { activePageOf, pageSignature } from '../core/scanner.js';
 import { classifyRow } from '../core/records.js';
 import { OpenRefusedError, SafetyViolation, assertFolderOpenTarget, assertParentLinkTarget } from '../safety/scope-validator.js';
 import type { AirEnvironment } from '../types/inventory.js';
-import { BREADCRUMB_COLLAPSED, detectEnvironment } from './navigator.js';
-import { extractListing } from './reader.js';
+import { BREADCRUMB_COLLAPSED, detectEnvironment, goToPageNumber } from './navigator.js';
+import { ListingNotFoundError, extractListing } from './reader.js';
 
 /**
  * Navegação controlada entre uma pasta e UMA subpasta (POC-01C). Sem recursão.
@@ -32,15 +32,68 @@ export type FolderContext = {
    * item listado numa pasta com localização registrada em outro ramo (não é atalho).
    */
   pathAnomalies?: number;
+  /** Página ativa no paginador no momento da leitura (undefined = sem paginador). */
+  activePage?: number;
+  /** Linhas exibidas na página lida. */
+  rows: number;
   /** Assinatura da página exibida no momento da leitura. */
   signature: string;
   environment: AirEnvironment;
 };
 
+/**
+ * Qual verificação de identidade falhou. Código seguro para logs (sem nomes, caminhos nem URLs);
+ * a mensagem do erro pode conter esses dados e só sai no modo detalhado.
+ */
+export type IdentityFailure =
+  | 'url-not-identified'
+  | 'title-missing'
+  | 'heading-breadcrumb-mismatch'
+  | 'path-divergent'
+  | 'listing-not-found'
+  | 'url-unchanged'
+  | 'title-mismatch'
+  | 'parent-chain-unknown'
+  | 'breadcrumb-mismatch'
+  | 'path-mismatch'
+  | 'insufficient-evidence'
+  | 'not-the-opened-folder'
+  | 'breadcrumb-missing'
+  | 'back-control-ambiguous'
+  | 'identity-mismatch'
+  /** Antes de voltar, a subpasta não pôde ser reposicionada na página em que foi aberta. */
+  | 'child-reposition-failed'
+  /** Depois de voltar, o pai não está na página ativa em que foi lido. */
+  | 'page-mismatch'
+  /** Depois de voltar, o total do pai indica itens, mas a listagem exibida está vazia. */
+  | 'empty-listing'
+  | 'timeout'
+  | 'read-error';
+
+/**
+ * Verificações observadas até o prazo de uma espera (sem valores). `conditions`: resultado de
+ * cada condição na última leitura bem-sucedida; `readFailures`: leituras que falharam, por código.
+ */
+export type IdentityChecks = {
+  observations: number;
+  conditions?: Record<string, boolean>;
+  readFailures: Partial<Record<IdentityFailure, number>>;
+  /** Todas as condições satisfeitas, mas a pasta não ficou estável por duas leituras. */
+  unstable: number;
+};
+
 export class FolderIdentityError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    readonly code: IdentityFailure = 'read-error',
+    readonly checks?: IdentityChecks,
+  ) {
     super(message);
     this.name = 'FolderIdentityError';
+  }
+
+  get category(): NavigationFailureCategory {
+    return IDENTITY_CODES.has(this.code) ? 'identity-mismatch' : 'navigation-failed';
   }
 }
 
@@ -49,11 +102,27 @@ export class FolderIdentityError extends Error {
  * Quem navega deve parar tudo e preservar o diagnóstico, sem novos cliques.
  */
 export class NavigationLostError extends FolderIdentityError {
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, cause?: unknown) {
+    super(message, cause instanceof FolderIdentityError ? cause.code : 'read-error', cause instanceof FolderIdentityError ? cause.checks : undefined);
     this.name = 'NavigationLostError';
   }
 }
+
+/** Código e verificações de um erro de navegação, sem dados identificáveis. */
+export function identityDiagnostic(error: unknown): { category: NavigationFailureCategory; code: IdentityFailure; checks?: IdentityChecks } | undefined {
+  return error instanceof FolderIdentityError ? { category: error.category, code: error.code, ...(error.checks ? { checks: error.checks } : {}) } : undefined;
+}
+
+/**
+ * Categoria do diagnóstico (ADR-013): 'identity-mismatch' = a pasta foi lida e NÃO é a esperada;
+ * 'navigation-failed' = não foi possível confirmar onde se está (prazo, controle ausente, leitura).
+ * Divergência de conteúdo ('content-changed') não é erro: é registrada como pendência.
+ */
+export type NavigationFailureCategory = 'identity-mismatch' | 'navigation-failed';
+const IDENTITY_CODES: ReadonlySet<IdentityFailure> = new Set<IdentityFailure>(['identity-mismatch', 'url-unchanged', 'title-mismatch', 'breadcrumb-mismatch', 'path-mismatch', 'not-the-opened-folder']);
+
+/** Resultado de uma volta verificada. `contentChanged`: identidade confirmada, conteúdo divergente. */
+export type ReturnOutcome = { restored: FolderContext; evidence: string[]; contentChanged?: { total: boolean; listing: boolean } };
 
 export type SubfolderCandidate = { name: string; rowIndex: number; expectedPath?: string };
 
@@ -76,12 +145,12 @@ function uniformPath(rows: ReadonlyArray<{ cells: Record<string, string> }>): st
  */
 export async function readFolderContext(page: Page, expectedPath?: string): Promise<FolderContext> {
   const [environment, listing] = [await detectEnvironment(page, {}), await extractListing(page)];
-  if (environment.pageUrl.status !== 'identified') throw new FolderIdentityError(`URL não identificada: ${environment.pageUrl.reason}`);
+  if (environment.pageUrl.status !== 'identified') throw new FolderIdentityError(`URL não identificada: ${environment.pageUrl.reason}`, 'url-not-identified');
   if (listing.folderTitle === undefined || listing.reportedTotal === undefined) {
-    throw new FolderIdentityError('Título "Nome (N)" da pasta não encontrado ou ambíguo.');
+    throw new FolderIdentityError('Título "Nome (N)" da pasta não encontrado ou ambíguo.', 'title-missing');
   }
   if (environment.currentFolder.status !== 'identified' || environment.currentFolder.value !== listing.folderTitle) {
-    throw new FolderIdentityError('Pasta atual não confirmada: título e breadcrumb divergem ou estão ausentes.');
+    throw new FolderIdentityError('Pasta atual não confirmada: título e breadcrumb divergem ou estão ausentes.', 'heading-breadcrumb-mismatch');
   }
   let path = uniformPath(listing.rows);
   let pathAnomalies = 0;
@@ -92,7 +161,7 @@ export async function readFolderContext(page: Page, expectedPath?: string): Prom
     const crumbs = environment.breadcrumb.status === 'identified' ? environment.breadcrumb.value : undefined;
     expectedPath ??= crumbs ? (crumbs.includes(BREADCRUMB_COLLAPSED) ? undefined : `/${crumbs.join('/')}`) : `/${listing.folderTitle}`;
     if (expectedPath === undefined || !paths.includes(expectedPath)) {
-      throw new FolderIdentityError('Coluna "Caminho" com valores diferentes entre linhas da mesma pasta.');
+      throw new FolderIdentityError('Coluna "Caminho" com valores diferentes entre linhas da mesma pasta.', 'path-divergent');
     }
     path = expectedPath;
     pathAnomalies = paths.filter((p) => p !== expectedPath).length;
@@ -104,6 +173,8 @@ export async function readFolderContext(page: Page, expectedPath?: string): Prom
     ...(environment.breadcrumb.status === 'identified' ? { breadcrumb: environment.breadcrumb.value } : {}),
     ...(path ? { path } : {}),
     ...(pathAnomalies ? { pathAnomalies } : {}),
+    ...(activePageOf(listing.pageIndicator) !== undefined ? { activePage: activePageOf(listing.pageIndicator) } : {}),
+    rows: listing.rows.length,
     signature: pageSignature(listing),
     environment,
   };
@@ -129,35 +200,45 @@ async function dialogOpen(page: Page): Promise<boolean> {
 }
 
 /**
- * Espera até a pasta exibida satisfazer `accept` e ficar estável (duas leituras iguais).
- * Um diálogo aberto interrompe imediatamente: o clique não foi uma navegação.
+ * Espera até a pasta exibida satisfazer TODAS as `conditions` e ficar estável (duas leituras
+ * iguais). Um diálogo aberto interrompe imediatamente: o clique não foi uma navegação.
+ * No tempo esgotado, o erro traz `checks`: qual condição falhou na última leitura e quais
+ * leituras falharam (por código) — para diagnosticar sem expor nomes, e sem só aumentar o prazo.
  */
 async function waitForFolder(
   page: Page,
-  accept: (ctx: FolderContext) => boolean,
+  conditions: Record<string, (ctx: FolderContext) => boolean>,
   options: FolderNavigationOptions,
   what: string,
   expectedPath?: string,
 ): Promise<FolderContext> {
   const deadline = Date.now() + options.timeoutMs;
+  const checks: IdentityChecks = { observations: 0, readFailures: {}, unstable: 0 };
   let last: FolderContext | undefined;
   let seen: FolderContext | undefined;
   while (Date.now() < deadline) {
     await page.waitForTimeout(options.pollMs);
     if (await dialogOpen(page)) throw new SafetyViolation(`Um diálogo foi aberto ao ${what}; operação interrompida. Feche-o manualmente.`);
+    checks.observations++;
     let ctx: FolderContext;
     try {
       ctx = await readFolderContext(page, expectedPath);
-    } catch {
-      last = undefined; // carregando ou em transição
+    } catch (error) {
+      // Carregando, em transição — ou uma condição de leitura que nunca será satisfeita.
+      const code = error instanceof FolderIdentityError ? error.code : error instanceof ListingNotFoundError ? 'listing-not-found' : 'read-error';
+      checks.readFailures[code] = (checks.readFailures[code] ?? 0) + 1;
+      last = undefined;
       continue;
     }
     seen = ctx;
-    if (accept(ctx) && last && last.signature === ctx.signature && last.pageUrl === ctx.pageUrl && last.total === ctx.total) return ctx;
-    last = accept(ctx) ? ctx : undefined;
+    checks.conditions = Object.fromEntries(Object.entries(conditions).map(([k, test]) => [k, test(ctx)]));
+    const accepted = Object.values(checks.conditions).every(Boolean);
+    if (accepted && last && last.signature === ctx.signature && last.pageUrl === ctx.pageUrl && last.total === ctx.total) return ctx;
+    if (accepted && last) checks.unstable++;
+    last = accepted ? ctx : undefined;
   }
   const shown = seen ? ` Pasta exibida: "${seen.title}" (${seen.pageUrl}).` : '';
-  throw new FolderIdentityError(`Tempo esgotado ao ${what}: a pasta esperada não foi confirmada.${shown}`);
+  throw new FolderIdentityError(`Tempo esgotado ao ${what}: a pasta esperada não foi confirmada.${shown}`, 'timeout', checks);
 }
 
 function sameSegments(a: readonly string[] | undefined, b: readonly string[]): boolean {
@@ -188,25 +269,25 @@ function chainOf(folder: FolderContext): string[] {
 /** Verifica que `child` é exatamente a subpasta `target` de `parent`. Retorna as evidências. */
 export function verifyChildIdentity(parent: FolderContext, target: SubfolderCandidate, child: FolderContext): string[] {
   const evidence: string[] = [];
-  if (child.pageUrl === parent.pageUrl) throw new FolderIdentityError('A URL não mudou após abrir a subpasta.');
+  if (child.pageUrl === parent.pageUrl) throw new FolderIdentityError('A URL não mudou após abrir a subpasta.', 'url-unchanged');
   evidence.push('URL mudou');
-  if (child.title !== target.name) throw new FolderIdentityError(`Título "${child.title}" difere da subpasta escolhida "${target.name}".`);
+  if (child.title !== target.name) throw new FolderIdentityError(`Título "${child.title}" difere da subpasta escolhida "${target.name}".`, 'title-mismatch');
   evidence.push(`título = "${target.name}"`);
   const parentChain = chainOf(parent);
-  if (parentChain.length === 0) throw new FolderIdentityError('Caminho completo da pasta pai desconhecido; identidade não confirmável.');
+  if (parentChain.length === 0) throw new FolderIdentityError('Caminho completo da pasta pai desconhecido; identidade não confirmável.', 'parent-chain-unknown');
   const expectedCrumbs = [...parentChain, target.name];
   if (child.breadcrumb !== undefined) {
     if (!breadcrumbMatches(child.breadcrumb, expectedCrumbs)) {
-      throw new FolderIdentityError(`Breadcrumb "${child.breadcrumb.join(' / ')}" não corresponde a "${expectedCrumbs.join(' / ')}".`);
+      throw new FolderIdentityError(`Breadcrumb "${child.breadcrumb.join(' / ')}" não corresponde a "${expectedCrumbs.join(' / ')}".`, 'breadcrumb-mismatch');
     }
     evidence.push(`breadcrumb ${child.breadcrumb.join(' / ')} ≅ ${expectedCrumbs.join(' / ')}`);
   }
   if (child.path !== undefined && target.expectedPath !== undefined) {
-    if (child.path !== target.expectedPath) throw new FolderIdentityError(`Caminho "${child.path}" difere do esperado "${target.expectedPath}".`);
+    if (child.path !== target.expectedPath) throw new FolderIdentityError(`Caminho "${child.path}" difere do esperado "${target.expectedPath}".`, 'path-mismatch');
     evidence.push(`caminho = ${target.expectedPath}`);
   }
   // Título sozinho não basta (nomes podem se repetir em pastas diferentes).
-  if (evidence.length < 3) throw new FolderIdentityError('Sem breadcrumb nem caminho para confirmar a identidade da subpasta.');
+  if (evidence.length < 3) throw new FolderIdentityError('Sem breadcrumb nem caminho para confirmar a identidade da subpasta.', 'insufficient-evidence');
   return evidence;
 }
 
@@ -245,10 +326,16 @@ export async function openSubfolder(
 
   await cell.click();
   try {
-    const child = await waitForFolder(page, (ctx) => ctx.pageUrl !== parent.pageUrl && ctx.title === target.name, options, 'abrir a subpasta', target.expectedPath);
+    const child = await waitForFolder(
+      page,
+      { urlChanged: (ctx) => ctx.pageUrl !== parent.pageUrl, titleMatches: (ctx) => ctx.title === target.name },
+      options,
+      'abrir a subpasta',
+      target.expectedPath,
+    );
     return { child, evidence: verifyChildIdentity(parent, target, child) };
   } catch (error) {
-    throw new NavigationLostError(error instanceof Error ? error.message : String(error));
+    throw new NavigationLostError(error instanceof Error ? error.message : String(error), error);
   }
 }
 
@@ -265,13 +352,22 @@ export async function returnToParent(
   child: FolderContext,
   parent: FolderContext,
   options: FolderNavigationOptions,
-): Promise<{ restored: FolderContext; evidence: string[] }> {
+): Promise<ReturnOutcome> {
   const here = await readFolderContext(page, child.path);
   if (here.pageUrl !== child.pageUrl || here.title !== child.title) {
-    throw new FolderIdentityError('A pasta exibida não é a subpasta aberta; retorno automático recusado.');
+    throw new FolderIdentityError('A pasta exibida não é a subpasta aberta; retorno automático recusado.', 'not-the-opened-folder');
+  }
+  // O AIR mantém a página corrente ao voltar (observado na POC-01E): sair da subpasta na página 2
+  // exibe o pai numa "página 2". Antes de voltar, a subpasta volta à página em que foi aberta,
+  // com a página ativa e a listagem conferidas contra o registrado na abertura.
+  if (child.activePage !== undefined && here.activePage !== child.activePage) {
+    const jump = await goToPageNumber(page, child.activePage, child.signature, options);
+    if (jump.status !== 'reached') {
+      throw new FolderIdentityError(`Não foi possível reposicionar a subpasta na página ${child.activePage} antes de voltar: ${jump.reason}`, 'child-reposition-failed');
+    }
   }
   const nav = page.locator('nav[aria-label*="breadcrumb" i]');
-  if ((await nav.count()) !== 1) throw new FolderIdentityError('Breadcrumb ausente ou ambíguo; retorne manualmente.');
+  if ((await nav.count()) !== 1) throw new FolderIdentityError('Breadcrumb ausente ou ambíguo; retorne manualmente.', 'breadcrumb-missing');
   const items = nav.locator('li:not([role="presentation"])');
   const count = await items.count();
   const currentItem = items.nth(count - 1);
@@ -297,26 +393,64 @@ export async function returnToParent(
     const header = page.locator('div:has(> svg.lucide-arrow-left)').filter({ has: page.locator('h2', { hasText: `${child.title} (${child.total})` }) });
     const back = header.locator('> svg.lucide-arrow-left');
     if ((await header.count()) !== 1 || (await back.count()) !== 1 || (await page.locator('svg.lucide-arrow-left').count()) !== 1) {
-      throw new FolderIdentityError('Pai colapsado no breadcrumb e "voltar" do cabeçalho não identificado com segurança; retorne manualmente.');
+      throw new FolderIdentityError('Pai colapsado no breadcrumb e "voltar" do cabeçalho não identificado com segurança; retorne manualmente.', 'back-control-ambiguous');
     }
     await back.click();
     via = 'voltar do cabeçalho (pai colapsado no breadcrumb)';
   }
 
   // A URL da SPA muda antes do conteúdo: espera URL E título do pai; o restante é verificado abaixo.
-  const restored = await waitForFolder(page, (ctx) => ctx.pageUrl === parent.pageUrl && ctx.title === parent.title, options, 'voltar à pasta pai', parent.path);
-  const mismatch = [
-    restored.pageUrl !== parent.pageUrl && 'URL',
-    restored.title !== parent.title && 'título',
-    restored.total !== parent.total && 'total',
-    restored.path !== parent.path && 'caminho',
-    (restored.breadcrumb ?? []).join('/') !== (parent.breadcrumb ?? []).join('/') && 'breadcrumb',
-  ].filter(Boolean);
+  const restored = await waitForFolder(
+    page,
+    { urlIsParent: (ctx) => ctx.pageUrl === parent.pageUrl, titleIsParent: (ctx) => ctx.title === parent.title },
+    options,
+    'voltar à pasta pai',
+    parent.path,
+  );
+  // ADR-013: IDENTIDADE primeiro (é a mesma pasta?), CONTEÚDO depois (ela mudou?).
+  // Identidade: URL e título sempre; breadcrumb quando exibido; "Caminho" só quando os dois lados o
+  // exibem (vem das linhas: uma pasta esvaziada não tem "Caminho", e isso é conteúdo, não identidade).
+  const identity = {
+    url: restored.pageUrl === parent.pageUrl,
+    title: restored.title === parent.title,
+    breadcrumb: (restored.breadcrumb ?? []).join('/') === (parent.breadcrumb ?? []).join('/'),
+    path: restored.path === undefined || parent.path === undefined || restored.path === parent.path,
+  };
+  const labels: Record<keyof typeof identity, string> = { url: 'URL', title: 'título', breadcrumb: 'breadcrumb', path: 'caminho' };
+  const mismatch = (Object.keys(identity) as Array<keyof typeof identity>).filter((k) => !identity[k]).map((k) => labels[k]);
   if (mismatch.length > 0) {
-    throw new FolderIdentityError(`Após voltar, a pasta exibida ("${restored.title}") não é a pasta pai: ${mismatch.join(', ')} diferem.`);
+    // Falha fechada: não é comprovadamente a pasta pai.
+    throw new FolderIdentityError(`Após voltar, a pasta exibida ("${restored.title}") não é a pasta pai: ${mismatch.join(', ')} diferem.`, 'identity-mismatch', {
+      observations: 1,
+      conditions: identity,
+      readFailures: {},
+      unstable: 0,
+    });
   }
-  const evidence = [`via ${via}`, `URL = ${parent.pageUrl}`, `título = "${parent.title}"`, `total = ${parent.total}`];
+  // Estado do pai (POC-01E): o pai precisa estar na página em que foi lido e exibir linhas quando o
+  // total indica itens. Uma listagem incomparável nunca é aceita como volta válida — sem isso, os
+  // cliques seguintes partiriam de uma página que não é a registrada.
+  const view = { activePage: restored.activePage === parent.activePage, rowsPresent: restored.total === 0 || restored.rows > 0 };
+  if (!view.activePage || !view.rowsPresent) {
+    const code: IdentityFailure = !view.rowsPresent ? 'empty-listing' : 'page-mismatch';
+    throw new FolderIdentityError(
+      `Após voltar, o pai não está na página esperada (ativa: ${restored.activePage ?? 'nenhuma'}; esperada: ${parent.activePage ?? 'nenhuma'}; linhas: ${restored.rows}; total: ${restored.total}).`,
+      code,
+      { observations: 1, conditions: view, readFailures: {}, unstable: 0 },
+    );
+  }
+  // Conteúdo (mesma página ativa, portanto comparável): total e listagem.
+  const totalChanged = restored.total !== parent.total;
+  const listingChanged = restored.signature !== parent.signature;
+  const evidence = [`via ${via}`, `URL = ${parent.pageUrl}`, `título = "${parent.title}"`];
   if (parent.path) evidence.push(`caminho = ${parent.path}`);
-  evidence.push(restored.signature === parent.signature ? 'listagem idêntica à lida antes' : 'listagem exibida difere da lida antes (outra página?)');
-  return { restored, evidence };
+  evidence.push(`página ativa = ${parent.activePage ?? 'sem paginador'}`);
+  evidence.push(totalChanged ? `total mudou de ${parent.total} para ${restored.total}` : `total = ${parent.total}`);
+  evidence.push(listingChanged ? 'listagem difere da lida antes' : 'listagem idêntica à lida antes');
+  return {
+    restored,
+    evidence,
+    // Divergência OBSERVADA; a causa (alteração concorrente ou outra) não é afirmada.
+    ...(totalChanged || listingChanged ? { contentChanged: { total: totalChanged, listing: listingChanged } } : {}),
+  };
 }

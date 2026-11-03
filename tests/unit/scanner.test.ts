@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { pageSignature, scanListing } from '../../src/core/scanner.js';
+import { activePageOf, pageSignature, scanListing } from '../../src/core/scanner.js';
 import { pageOf, simulatedSource } from '../helpers.js';
 
 const options = { maxPages: 50, readTimeoutMs: 200 };
@@ -156,5 +156,31 @@ describe('pageSignature', () => {
     const b = { rows: [{ ...a.rows[0]!, cells: { ...a.rows[0]!.cells, Status: 'Arquivado' } }] };
     expect(pageSignature(a)).not.toBe(pageSignature(b));
     expect(pageSignature(a)).toBe(pageSignature(pageOf(['A'])));
+  });
+});
+
+describe('página ativa (POC-01E)', () => {
+  it('lê o número da página dos dois formatos de indicador', () => {
+    expect(activePageOf('página ativa 7')).toBe(7);
+    expect(activePageOf('Página 3 de 9')).toBe(3);
+    expect(activePageOf(undefined)).toBeUndefined();
+    expect(activePageOf('Registros por página 30')).toBeUndefined();
+  });
+
+  it('leitura que não começa na página 1 é parcial', async () => {
+    const all = names(60);
+    const pages = [pageOf(all.slice(0, 30), 60, 'página ativa 2'), pageOf(all.slice(30), 60, 'página ativa 3')];
+    const { coverage } = await scanListing(simulatedSource(pages), options);
+    expect(coverage).toMatchObject({ pagesRead: 0, complete: false, stopReason: 'error' });
+    expect(coverage.issues[0]).toMatchObject({ kind: 'page-mismatch', pageNumber: 1 });
+  });
+
+  it('"próxima" que pula uma página é detectado', async () => {
+    const all = names(90);
+    const pages = [pageOf(all.slice(0, 30), 90, 'página ativa 1'), pageOf(all.slice(60), 90, 'página ativa 3')];
+    const { items, coverage } = await scanListing(simulatedSource(pages), options);
+    expect(items).toHaveLength(30);
+    expect(coverage.complete).toBe(false);
+    expect(coverage.issues.map((i) => i.kind)).toEqual(['page-mismatch']);
   });
 });

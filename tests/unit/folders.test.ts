@@ -6,7 +6,7 @@ import { SafetyViolation, assertFolderOpenTarget, assertParentLinkTarget, type F
 import { pageOf, row, simulatedSource } from '../helpers.js';
 
 function ctx(overrides: Partial<FolderContext>): FolderContext {
-  return { pageUrl: 'https://air.test/air/my-air/A', title: 'Pai', total: 1, signature: 's', environment: {} as FolderContext['environment'], ...overrides };
+  return { pageUrl: 'https://air.test/air/my-air/A', title: 'Pai', total: 1, rows: 1, signature: 's', environment: {} as FolderContext['environment'], ...overrides };
 }
 
 describe('assertFolderOpenTarget', () => {

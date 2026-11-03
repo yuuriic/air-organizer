@@ -91,7 +91,9 @@ export type ScanIssueKind =
   | 'scope-changed'
   | 'parse-warning'
   | 'count-mismatch'
-  | 'filter-active';
+  | 'filter-active'
+  /** A página ativa no paginador não é a página que o scanner esperava ler. */
+  | 'page-mismatch';
 
 export type ScanIssue = {
   kind: ScanIssueKind;
@@ -182,7 +184,13 @@ export type PendingReason =
   | 'repeated-visit'
   | 'navigation-lost'
   | 'return-failed'
-  | 'run-aborted';
+  | 'run-aborted'
+  /**
+   * ADR-013: a volta confirmou a identidade da pasta, mas o total ou a listagem divergiram do
+   * lido antes. Divergência OBSERVADA, não sua causa. A pasta e os ancestrais deixam de ser
+   * completos, e as subpastas ainda não abertas não são abertas a partir da listagem antiga.
+   */
+  | 'content-changed';
 
 export type FolderNode = {
   /** Referência sequencial da execução (F1 = pasta inicial). Não é ID do AIR. */
@@ -198,8 +206,19 @@ export type FolderNode = {
   refusal?: string;
   counts: { items: number; folders: number; files: number; unknown: number; locationMismatch: number; pagesRead: number; unreadPages: number[] };
   issueKinds: ScanIssueKind[];
+  /**
+   * Subárvore reaproveitada de um checkpoint (não reaberta nesta sessão): data da observação
+   * original. Ver ARCHITECTURE.md §7.7.
+   */
+  reusedFrom?: string;
+  /**
+   * Comparação com o checkpoint, em execuções retomadas: 'unchanged'/'changed' = relida nesta
+   * sessão e comparada (total, páginas, itens); 'new' = sem registro; 'reused' = NÃO relida.
+   */
+  verification?: 'unchanged' | 'changed' | 'new' | 'reused';
   /* ── Campos identificáveis: só saem no inventário detalhado, com confirmação. ── */
-  name: string;
+  /** Ausente em descendentes reaproveitados de checkpoint (o checkpoint não guarda nomes). */
+  name?: string;
   path?: string;
   pageUrl?: string;
   items: AirItem[];
@@ -207,23 +226,81 @@ export type FolderNode = {
   diagnostics: string[];
 };
 
+export type TreeTotals = {
+  foldersRead: number;
+  foldersPending: number;
+  items: number;
+  folders: number;
+  files: number;
+  unknown: number;
+  pagesRead: number;
+};
+
 export type TreeResult = {
   status: 'complete' | 'partial' | 'failed';
   limits: TreeLimits;
   /** Interrupção da execução inteira (navegação incerta): nenhum clique depois disso. */
-  abort?: { reason: 'navigation-lost' | 'return-failed'; atRef: string; message: string };
+  abort?: { reason: 'navigation-lost' | 'return-failed'; atRef: string; message: string; diagnostic?: NavigationDiagnostic };
   limitsReached: Array<'max-depth' | 'max-folders' | 'max-items' | 'max-pages'>;
   folders: FolderNode[];
-  totals: { foldersRead: number; foldersPending: number; items: number; folders: number; files: number; unknown: number };
+  totals: TreeTotals;
+  /** Presente em execuções retomadas: modo, reaproveitamento e comparação com o checkpoint. */
+  resume?: {
+    mode: ResumeMode;
+    reusedFolders: number;
+    oldestReusedObservation?: string;
+    /** Pastas relidas nesta sessão, comparadas com o registro do checkpoint. */
+    unchanged: number;
+    changed: number;
+    /** Pastas sem registro no checkpoint. */
+    new: number;
+    /** Subpastas registradas que não aparecem mais na listagem relida do pai. */
+    removed: number;
+  };
+  /**
+   * Toda pasta contada foi lida NESTA sessão? Só então o resultado completo pode servir de base
+   * para planejar movimentações (POC-02). Nenhum modo garante consistência transacional: o AIR
+   * pode mudar durante a própria leitura.
+   */
+  verification: { contentRevalidated: boolean; eligibleForPlanning: boolean };
+  /**
+   * Diagnósticos de navegação separados (ADR-013), sem dados identificáveis: pastas com conteúdo
+   * divergente na volta, e a categoria da interrupção, se houve.
+   */
+  navigation: { contentChanged: number; identityMismatch: number; navigationFailed: number };
 };
+
+/**
+ * 'fast': reaproveita subárvores assentadas (conteúdo interno NÃO revalidado).
+ * 'verified': relê todo o escopo e compara com o checkpoint.
+ */
+export type ResumeMode = 'fast' | 'verified';
+
+/**
+ * Por que a navegação foi dada como perdida, sem dados identificáveis: código da verificação que
+ * falhou e, numa espera esgotada, o resultado de cada condição e as leituras que falharam.
+ */
+export type NavigationDiagnostic = {
+  /** 'identity-mismatch' (lida e não é a esperada) ou 'navigation-failed' (não confirmável). */
+  category?: 'identity-mismatch' | 'navigation-failed';
+  code: string;
+  checks?: { observations: number; conditions?: Record<string, boolean>; readFailures: Partial<Record<string, number>>; unstable: number };
+};
+
+/** Progresso acumulado da execução (sem dados identificáveis). */
+export type TreeProgress = { foldersRead: number; items: number; pages: number; pending: number };
 
 /** Evento de progresso. Nunca contém nomes, caminhos ou URLs. */
 export type TreeEvent = {
-  type: 'folder-read' | 'folder-pending' | 'limit-reached' | 'aborted';
+  type: 'folder-read' | 'folder-pending' | 'folder-reused' | 'limit-reached' | 'aborted' | 'progress';
   ref: string;
   depth: number;
   status?: FolderStatus;
   reasons?: PendingReason[];
   items?: number;
   pages?: number;
+  /** Só em 'folder-reused': pastas da subárvore reaproveitada. */
+  folders?: number;
+  /** Só em 'progress'. */
+  progress?: TreeProgress;
 };

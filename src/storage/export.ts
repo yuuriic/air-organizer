@@ -87,7 +87,8 @@ export function displayPath(file: string, outputDir = DEFAULT_OUTPUT_DIR): strin
   return [outputDir, '*', '*', parts[2], parts[3]].join('/');
 }
 
-export type TreeRunMeta = { runId: string; startedAt: string; finishedAt: string; environment: AirEnvironment };
+/** `checkpointRunId`: execução (checkpoint) a que esta sessão pertence; cada sessão exporta no próprio runId. */
+export type TreeRunMeta = { runId: string; startedAt: string; finishedAt: string; environment: AirEnvironment; checkpointRunId?: string };
 
 /**
  * Exporta a leitura recursiva. Padrão: só o relatório diagnóstico, sem dados identificáveis
@@ -101,7 +102,16 @@ export async function exportTreeResult(
   options: { detailed: boolean },
   outputDir = DEFAULT_OUTPUT_DIR,
 ): Promise<string[]> {
-  const base = { schemaVersion: 2, tool: 'air-organizer', mode: 'recursive', readOnly: true, runId: meta.runId, startedAt: meta.startedAt, finishedAt: meta.finishedAt };
+  const base = {
+    schemaVersion: 2,
+    tool: 'air-organizer',
+    mode: 'recursive',
+    readOnly: true,
+    runId: meta.runId,
+    ...(meta.checkpointRunId ? { checkpointRunId: meta.checkpointRunId } : {}),
+    startedAt: meta.startedAt,
+    finishedAt: meta.finishedAt,
+  };
   const dir = path.dirname(
     assertInsideDirectory(
       outputDir,
