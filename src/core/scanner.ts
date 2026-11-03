@@ -52,6 +52,15 @@ export function pageSignature(snapshot: Pick<PageSnapshot, 'rows' | 'pageIndicat
   return hash.digest('hex');
 }
 
+/**
+ * Número da página ativa a partir do indicador da listagem: "Página 3 de 9" (rótulo textual)
+ * ou "página ativa 3" (botão numérico destacado no paginador do AIR). undefined = não exibido.
+ */
+export function activePageOf(indicator: string | undefined): number | undefined {
+  const match = indicator?.match(/^p[aá]gina\s+(?:ativa\s+)?(\d+)(?:\s+de\s+\d+)?$/i);
+  return match ? Number(match[1]) : undefined;
+}
+
 class TimeoutError extends Error {}
 
 async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
@@ -113,6 +122,15 @@ export async function scanListing(source: ListingSource, options: ScanOptions): 
       break;
     }
     seenSignatures.set(signature, pageNumber);
+
+    // Com o paginador exibindo a página ativa, ela precisa ser a esperada (ex.: a leitura não
+    // começou na página 1, ou o "próxima" pulou páginas).
+    const active = activePageOf(snapshot.pageIndicator);
+    if (active !== undefined && active !== pageNumber) {
+      issues.push({ kind: 'page-mismatch', pageNumber, message: `O paginador indica a página ${active}, mas a leitura esperava a página ${pageNumber}.` });
+      stopReason = 'error';
+      break;
+    }
 
     if (snapshot.reportedTotal !== undefined) {
       if (reportedTotal !== undefined && reportedTotal !== snapshot.reportedTotal) {

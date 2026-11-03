@@ -1,6 +1,6 @@
 import { chromium, type Browser, type Page } from 'playwright';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { FolderIdentityError, listVisibleSubfolders, openSubfolder, readFolderContext, returnToParent } from '../../src/air/folders.js';
+import { FolderIdentityError, NavigationLostError, identityDiagnostic, listVisibleSubfolders, openSubfolder, readFolderContext, returnToParent } from '../../src/air/folders.js';
 import { createAirListingSource, detectEnvironment, probePagination } from '../../src/air/navigator.js';
 import { extractListing, parseRows } from '../../src/air/reader.js';
 import { scanListing } from '../../src/core/scanner.js';
@@ -227,5 +227,124 @@ describe('navegação controlada em subpastas (fixture com o comportamento do AI
     expect(items.map((i) => i.kind)).toEqual(['unknown', 'unknown']);
     expect(await listVisibleSubfolders(page, await readFolderContext(page))).toEqual([]);
     await page.context().close();
+  });
+});
+
+/**
+ * Investigação POC-01E: no AIR real, um clique de abertura terminou em "tempo esgotado" sem dizer
+ * por quê. Cada causa possível precisa deixar uma assinatura própria nas verificações (sem nomes),
+ * para ser identificada na próxima execução real em vez de simplesmente aumentar o prazo.
+ */
+describe('diagnóstico de identidade após o clique', () => {
+  const SHORT = { timeoutMs: 800, pollMs: 50 };
+  const alfa = 'Setor Exemplo - Unidade Alfa';
+
+  async function attempt(options: Partial<TreeFixtureOptions>, name = alfa) {
+    const page = await open('root', options);
+    const { parent, target } = await subfolder(page, name);
+    const error = await openSubfolder(page, parent, target, SHORT).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    const forbidden = await forbiddenClicks(page);
+    await page.context().close();
+    expect(error).toBeInstanceOf(NavigationLostError);
+    expect(forbidden).toEqual([]);
+    return identityDiagnostic(error)!;
+  }
+
+  it('clique sem navegação: URL não muda', async () => {
+    const d = await attempt({ inertRows: ['alfa'] });
+    expect(d).toMatchObject({ code: 'timeout', checks: { conditions: { urlChanged: false, titleMatches: false }, readFailures: {} } });
+  });
+
+  it('carregamento lento: URL mudou, título ainda é o do pai', async () => {
+    const d = await attempt({ slowOpen: { alfa: 3_000 } });
+    expect(d).toMatchObject({ code: 'timeout', checks: { conditions: { urlChanged: true, titleMatches: false } } });
+  });
+
+  it('título exibido diferente do nome da linha: título e breadcrumb divergem em toda leitura', async () => {
+    const d = await attempt({ titleOverride: { alfa: alfa.toUpperCase() } });
+    expect(d.code).toBe('timeout');
+    expect(d.checks?.readFailures['heading-breadcrumb-mismatch']).toBeGreaterThan(0);
+    expect(d.checks?.conditions?.titleMatches).not.toBe(true);
+  });
+
+  it('breadcrumb que trunca o nome no texto: mesma assinatura de título x breadcrumb', async () => {
+    const d = await attempt({ breadcrumbTruncateAt: 10 });
+    expect(d.checks?.readFailures['heading-breadcrumb-mismatch']).toBeGreaterThan(0);
+  });
+
+  it('"Caminho" uniforme mas diferente do esperado: abre, e a verificação final recusa', async () => {
+    const root: TreeNode = { id: 'root', name: 'Meu Air', type: 'folder', children: [
+      { id: 'x', name: 'X', type: 'folder', children: [{ id: 'x1', name: 'a.pdf', type: 'file', pathOverride: '/Outro' }, { id: 'x2', name: 'b.pdf', type: 'file', pathOverride: '/Outro' }] },
+    ] };
+    const d = await attempt({ root }, 'X');
+    expect(d).toEqual({ category: 'identity-mismatch', code: 'path-mismatch' });
+  });
+
+  it('"Caminho" divergente entre linhas, nenhuma igual ao esperado: leitura recusada até o prazo', async () => {
+    const root: TreeNode = { id: 'root', name: 'Meu Air', type: 'folder', children: [
+      { id: 'x', name: 'X', type: 'folder', children: [{ id: 'x1', name: 'a.pdf', type: 'file', pathOverride: '/Outro1' }, { id: 'x2', name: 'b.pdf', type: 'file', pathOverride: '/Outro2' }] },
+    ] };
+    const d = await attempt({ root }, 'X');
+    expect(d.code).toBe('timeout');
+    expect(d.checks?.readFailures['path-divergent']).toBeGreaterThan(0);
+  });
+
+  it('pasta errada (outro destino): URL muda, título não confere', async () => {
+    const d = await attempt({ misrouteTo: { alfa: 'other' } });
+    expect(d).toMatchObject({ code: 'timeout', checks: { conditions: { urlChanged: true, titleMatches: false } } });
+  });
+
+  it('a assinatura diagnóstica não contém nomes, caminhos nem URLs', async () => {
+    const d = await attempt({ titleOverride: { alfa: alfa.toUpperCase() } });
+    const text = JSON.stringify(d);
+    for (const s of ['Setor', 'Alfa', 'Meu Air', 'fixture.test', 'my-air', '/']) expect(text).not.toContain(s);
+  });
+});
+
+describe('ADR-013: identidade x conteúdo na volta ao pai', () => {
+  type Cfg = { root: TreeNode };
+  const mutate = (page: Page, fn: string) => page.evaluate((code) => new Function('cfg', code)((window as unknown as { __cfg: Cfg }).__cfg), fn);
+
+  async function roundTrip(change: string) {
+    const page = await open('root');
+    const { parent, target } = await subfolder(page, 'Setor Exemplo - Unidade Alfa');
+    const { child } = await openSubfolder(page, parent, target, NAV);
+    await mutate(page, change); // alteração no AIR enquanto estamos na subpasta
+    const outcome = await returnToParent(page, child, parent, NAV).then((o) => o, (e: unknown) => e);
+    const forbidden = await forbiddenClicks(page);
+    await page.context().close();
+    expect(forbidden).toEqual([]);
+    return outcome;
+  }
+
+  it('identidade confirmada e total alterado: aceita a volta e registra content-changed', async () => {
+    const outcome = await roundTrip("cfg.root.children = cfg.root.children.filter((c) => c.id !== 'other');");
+    expect(outcome).toMatchObject({ restored: { title: 'Meu Air', total: 3 }, contentChanged: { total: true, listing: true } });
+  });
+
+  it('identidade confirmada e listagem alterada com o mesmo total: content-changed só de listagem', async () => {
+    const outcome = await roundTrip("cfg.root.children.find((c) => c.id === 'leia').name = 'leia-me-v2.pdf';");
+    expect(outcome).toMatchObject({ contentChanged: { total: false, listing: true } });
+  });
+
+  it('sem alteração: volta sem content-changed', async () => {
+    const outcome = await roundTrip('');
+    expect(outcome).not.toHaveProperty('contentChanged');
+  });
+
+  it('identidade divergente ("Caminho" de outra pasta): falha fechada como identity-mismatch, sem valores', async () => {
+    const error = await roundTrip("for (const c of cfg.root.children) c.pathOverride = '/Outra Raiz';");
+    expect(error).toBeInstanceOf(FolderIdentityError);
+    const d = identityDiagnostic(error)!;
+    expect(d).toMatchObject({ category: 'identity-mismatch', code: 'identity-mismatch', checks: { conditions: { url: true, title: true, breadcrumb: true, path: false } } });
+    for (const s of ['Meu Air', 'Outra Raiz', 'fixture.test', '/']) expect(JSON.stringify(d)).not.toContain(s);
+  });
+
+  it('pasta pai esvaziada: sem Caminho não há divergência de identidade, só de conteúdo', async () => {
+    const outcome = await roundTrip('cfg.root.children = [];');
+    expect(outcome).toMatchObject({ restored: { total: 0 }, contentChanged: { total: true } });
   });
 });

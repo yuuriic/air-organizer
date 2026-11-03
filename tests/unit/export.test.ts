@@ -140,7 +140,9 @@ describe('exportTreeResult', () => {
         items: [], diagnostics: ['Breadcrumb de BELTRANA DE TAL'],
       },
     ],
-    totals: { foldersRead: 1, foldersPending: 1, items: 1, folders: 1, files: 0, unknown: 0 },
+    totals: { foldersRead: 1, foldersPending: 1, items: 1, folders: 1, files: 0, unknown: 0, pagesRead: 1 },
+    verification: { contentRevalidated: true, eligibleForPlanning: false },
+    navigation: { contentChanged: 0, identityMismatch: 0, navigationFailed: 0 },
   };
 
   it('por padrão grava só o diagnóstico, sem nomes, caminhos, URLs ou mensagens', async () => {

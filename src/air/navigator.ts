@@ -1,5 +1,5 @@
 import type { Locator, Page } from 'playwright';
-import { pageSignature, type ListingSource, type NextPageResult } from '../core/scanner.js';
+import { activePageOf, pageSignature, type ListingSource, type NextPageResult } from '../core/scanner.js';
 import {
   NEXT_PAGE_ICON_LABEL,
   NEXT_PAGE_LABEL,
@@ -11,7 +11,7 @@ import {
   type ScopeFingerprint,
 } from '../safety/scope-validator.js';
 import type { AirEnvironment, Identified } from '../types/inventory.js';
-import { extractListing } from './reader.js';
+import { extractListing, type Listing } from './reader.js';
 
 /** Valores confirmados pelo implantador. A UI ainda não tem seletor validado para eles. */
 export type OperatorContext = { client?: string; sector?: string };
@@ -208,37 +208,96 @@ export async function goToNextPage(
   return { status: changed ? 'timeout' : 'unchanged' };
 }
 
-/**
- * Vai para a página `n` pelo botão numérico do paginador e confirma que a listagem exibida
- * é exatamente a registrada antes (`expectedSignature`). Usado pela leitura recursiva para
- * reposicionar a pasta antes de abrir uma subpasta (não há ação "página anterior").
- * Retorna false se o botão não existir de forma inequívoca ou o conteúdo não conferir.
- */
-export async function goToPageNumber(page: Page, n: number, expectedSignature: string, options: PaginationOptions): Promise<boolean> {
-  const current = pageSignature(await extractListing(page));
-  if (current === expectedSignature) return true;
-  const buttons = page.getByRole('button', { name: String(n), exact: true });
+/** Botão numérico `n` do paginador, se for único e estiver dentro do paginador. Nunca as reticências (<span>). */
+async function pageButton(page: Page, n: number): Promise<Locator | undefined> {
   const valid: Locator[] = [];
-  for (const b of await buttons.all()) {
+  for (const b of await page.getByRole('button', { name: String(n), exact: true }).all()) {
     if (((await b.textContent()) ?? '').trim() === String(n) && (await b.evaluate(IN_PAGER))) valid.push(b);
   }
-  if (valid.length !== 1) return false;
-  assertReadOnlyAction('pagination-page', String(n));
-  await valid[0]!.click();
+  return valid.length === 1 ? valid[0] : undefined;
+}
 
+/**
+ * Espera a página ativa ser `expected`, com conteúdo diferente de `previousSignature`,
+ * não vazio e estável (duas leituras iguais). undefined = não confirmada no prazo.
+ */
+async function waitForActivePage(page: Page, expected: number, previousSignature: string, options: PaginationOptions): Promise<Listing | undefined> {
   const deadline = Date.now() + options.timeoutMs;
   let last: string | undefined;
   while (Date.now() < deadline) {
     await page.waitForTimeout(options.pollMs);
     try {
-      const signature = pageSignature(await extractListing(page));
-      if (signature === expectedSignature && last === signature) return true;
+      const listing = await extractListing(page);
+      const signature = pageSignature(listing);
+      if (activePageOf(listing.pageIndicator) === expected && signature !== previousSignature && listing.rows.length > 0 && signature === last) return listing;
       last = signature;
     } catch {
       last = undefined;
     }
   }
-  return false;
+  return undefined;
+}
+
+export type PageJump = { status: 'reached'; clicks: number } | { status: 'failed'; clicks: number; reason: string };
+
+/**
+ * Vai para a página `n` da pasta exibida e confirma que a listagem é exatamente a registrada
+ * antes (`expectedSignature`). Usado para reposicionar a pasta antes de abrir uma subpasta.
+ *
+ * Só usa controles confirmados no AIR real (POC-01B/01D): o botão numérico `n`, se visível;
+ * senão, o maior número visível abaixo de `n` e, a partir dele, "próxima página", um passo por
+ * vez. Paginadores com reticências ([1][2][...][35]) escondem as páginas intermediárias; as
+ * reticências nunca são clicadas, e o campo "Ir" não é usado (sem evidência do DOM real).
+ *
+ * Cada passo exige a página ativa esperada e uma listagem nova e estável. Conteúdo repetido em
+ * outro número de página (loop), página ativa não identificada, controle ausente ou ambíguo e
+ * excesso de passos interrompem (falha fechada). Nenhuma URL é montada.
+ */
+export async function goToPageNumber(page: Page, n: number, expectedSignature: string, options: PaginationOptions): Promise<PageJump> {
+  let listing: Listing = await extractListing(page);
+  let clicks = 0;
+  const failed = (reason: string): PageJump => ({ status: 'failed', clicks, reason });
+  // Já exibida: a assinatura registrada inclui o indicador de página. Cobre também pastas
+  // de página única, em que o AIR pode não mostrar paginador.
+  if (pageSignature(listing) === expectedSignature) return { status: 'reached', clicks };
+  const seen = new Map<string, number>();
+  // Do pior ponto de partida (página 1, só "1" e "2" visíveis) são no máximo n passos.
+  for (let step = 0; step <= n + 1; step++) {
+    const signature = pageSignature(listing);
+    const active = activePageOf(listing.pageIndicator);
+    if (active === undefined) return failed('Página ativa não identificada no paginador.');
+    const earlier = seen.get(signature);
+    if (earlier !== undefined && earlier !== active) return failed(`Conteúdo da página ${active} repete o da página ${earlier} (loop).`);
+    seen.set(signature, active);
+    if (active === n) return signature === expectedSignature ? { status: 'reached', clicks } : failed(`O conteúdo da página ${n} difere do lido antes.`);
+
+    const visible = listing.visiblePages ?? [];
+    const anchor = Math.max(...visible.filter((v) => v < n));
+    let expected: number;
+    let control: Locator | undefined;
+    if (visible.includes(n) || (Number.isFinite(anchor) && (active > n || active < anchor))) {
+      // Salto direto para `n` ou para o ponto visível mais próximo abaixo dele.
+      expected = visible.includes(n) ? n : anchor;
+      control = await pageButton(page, expected);
+      if (!control) return failed(`Botão da página ${expected} ausente ou ambíguo no paginador.`);
+      assertReadOnlyAction('pagination-page', String(expected));
+    } else if (active < n) {
+      const found = await findNextControl(page);
+      if (found.probe.status !== 'found' || found.probe.disabled || !found.control) return failed('"Próxima página" indisponível antes de alcançar a página.');
+      assertReadOnlyAction('pagination-next', found.probe.label);
+      expected = active + 1;
+      control = found.control;
+    } else {
+      return failed(`Nenhum controle confirmado leva à página ${n}.`);
+    }
+
+    await control.click();
+    clicks++;
+    const next = await waitForActivePage(page, expected, signature, options);
+    if (!next) return failed(`A página ${expected} não foi confirmada após o clique.`);
+    listing = next;
+  }
+  return failed(`Página ${n} não alcançada dentro do limite de passos.`);
 }
 
 /** Adaptador ListingSource sobre a página atual do AIR, com verificação de escopo a cada página. */

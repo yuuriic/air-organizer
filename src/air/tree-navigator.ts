@@ -1,6 +1,6 @@
 import type { Page } from 'playwright';
 import { scanListing } from '../core/scanner.js';
-import type { ChildRef, FolderView, TreeNavigator } from '../core/tree-scanner.js';
+import type { BackOutcome, ChildRef, FolderView, TreeNavigator } from '../core/tree-scanner.js';
 import { OpenRefusedError, fingerprintOf } from '../safety/scope-validator.js';
 import type { ScanResult } from '../types/inventory.js';
 import { NavigationLostError, openSubfolder, readFolderContext, returnToParent, type FolderContext, type FolderNavigationOptions } from './folders.js';
@@ -47,18 +47,21 @@ export function createAirTreeNavigator(
       const recorded = parentScan.pages[child.sourcePage - 1];
       if (!recorded) throw new OpenRefusedError('precondition', 'Página da subpasta não registrada na leitura do pai.');
       // Reposiciona na página da subpasta; o conteúdo precisa ser idêntico ao lido antes.
-      if (!(await goToPageNumber(page, child.sourcePage, recorded.signature, options))) {
-        throw new OpenRefusedError('precondition', `Não foi possível voltar à página ${child.sourcePage} com o mesmo conteúdo lido antes.`);
+      // Só páginas efetivamente lidas (portanto dentro de maxPagesPerFolder) são alvo.
+      const jump = await goToPageNumber(page, child.sourcePage, recorded.signature, options);
+      if (jump.status !== 'reached') {
+        throw new OpenRefusedError('precondition', `Não foi possível voltar à página ${child.sourcePage} com o mesmo conteúdo lido antes: ${jump.reason}`);
       }
       const { child: ctx } = await openSubfolder(page, contextOf(parent), child, options);
       return view(ctx);
     },
 
-    async back(child, parent): Promise<void> {
+    async back(child, parent): Promise<BackOutcome> {
       try {
-        await returnToParent(page, contextOf(child), contextOf(parent), options);
+        const { contentChanged } = await returnToParent(page, contextOf(child), contextOf(parent), options);
+        return contentChanged ? { contentChanged } : {};
       } catch (error) {
-        throw new NavigationLostError(error instanceof Error ? error.message : String(error));
+        throw new NavigationLostError(error instanceof Error ? error.message : String(error), error);
       }
     },
   };

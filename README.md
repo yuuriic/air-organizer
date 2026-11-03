@@ -2,7 +2,7 @@
 
 Ferramenta local e supervisionada para auxiliar implantadores na organização documental do AIR (Printer do Brasil). Funciona com qualquer instância, cliente, cidade ou setor: é **multiambiente e multissetor**, e nenhum identificador de instância, cliente, setor ou pasta está fixo no código.
 
-**Estágio atual: POC-01D, estritamente somente leitura.** A ferramenta lê a listagem exibida pela interface oficial do AIR, percorre a paginação, entra em subpastas por cliques verificados (inclusive em profundidade, com limites), aponta suspeitas de duplicidade por nome e exporta relatórios. Ela não move, cria, exclui, edita nem renomeia nada. Planejamento (POC-02) e movimentação (POC-03) **não estão implementados**.
+**Estágio atual: POC-01E, estritamente somente leitura.** A ferramenta lê a listagem exibida pela interface oficial do AIR, percorre a paginação (inclusive páginas escondidas por reticências), entra em subpastas por cliques verificados (inclusive em profundidade, com limites), grava checkpoints para retomar leituras interrompidas, aponta suspeitas de duplicidade por nome e exporta relatórios. Ela não move, cria, exclui, edita nem renomeia nada. Planejamento (POC-02) e movimentação (POC-03) **não estão implementados**.
 
 Veja [ARCHITECTURE.md](ARCHITECTURE.md) para os princípios, as decisões registradas e o plano de entregas.
 
@@ -34,7 +34,8 @@ A URL da instância é informada pelo usuário (argumento `--url`, variável `AI
 3. Analisar uma subpasta       (ida e volta, com confirmação; sem recursão)
 4. Exibir possíveis duplicidades
 5. Exportar inventário
-6. Analisar árvore             (recursivo controlado, com limites)
+6. Analisar árvore             (recursivo controlado, com limites e checkpoint)
+7. Retomar análise de árvore  (só aparece com checkpoint válido)
 0. Sair
 ```
 
@@ -45,7 +46,8 @@ A URL da instância é informada pelo usuário (argumento `--url`, variável `AI
 5. **Opção 3** lê a pasta atual, lista as subpastas **visíveis** na página (só linhas com ícone de pasta), pede que você escolha e confirme uma, abre-a pela interface, confirma a identidade, lê todas as páginas dela e volta à pasta anterior, confirmando o retorno. Qualquer divergência interrompe a operação. **É a única opção que exibe nomes sem confirmação adicional**, porque a escolha depende deles.
 6. **Opção 4** lista as suspeitas de duplicidade por referência (D1, D2…), confiança, regras e número de itens. Os nomes só aparecem se você confirmar.
 7. **Opção 5** grava sempre `output/<instância>/<setor>/<execução>/inventory-diagnostic.json`, **sem dados identificáveis**. O `inventory.json`, com nomes, caminhos e URLs, só é gravado se você confirmar explicitamente (mesma política da opção 6).
-8. **Opção 6** lê a pasta exibida e seus descendentes em profundidade (DFS), dentro de limites que você confirma: `maxDepth`, `maxFolders`, `maxItems` e `maxPagesPerFolder`. Os padrões são conservadores (1 / 5 / 100 / 2). Ao atingir um limite, a leitura para e fica **parcial**, e os limites nunca são aumentados automaticamente. O console mostra só referências (F1, F2…), contagens, status e motivos. É gravado o `tree-diagnostic.json`, também sem dados identificáveis. O `tree-inventory.json`, com nomes e caminhos, só é gravado se você confirmar explicitamente no fim.
+8. **Opção 6** lê a pasta exibida e seus descendentes em profundidade (DFS), dentro de limites que você confirma: `maxDepth`, `maxFolders`, `maxItems` e `maxPagesPerFolder`. Os padrões são conservadores (1 / 5 / 100 / 2). Ao atingir um limite, a leitura para e fica **parcial**, e os limites nunca são aumentados automaticamente. O console mostra só referências (F1, F2…), contagens, status e motivos. É gravado o `tree-diagnostic.json`, também sem dados identificáveis. O `tree-inventory.json`, com nomes e caminhos, só é gravado se você confirmar explicitamente no fim. Durante a leitura, o console mostra o progresso (`[executando] pastas · itens · páginas · pendências`), e o resultado sai como CONCLUÍDO, PARCIAL ou INTERROMPIDO, com os limites utilizados e as pendências. A cada passo é gravado um **checkpoint** (ver abaixo).
+9. **Opção 7** só aparece quando existe checkpoint válido. Ela retoma uma execução a partir da **mesma pasta inicial**, que você abre manualmente no Chrome dedicado (nenhuma URL é montada). Instância, cliente, setor e pasta inicial precisam coincidir com os gravados; senão, a retomada é recusada com o motivo. Você escolhe o **modo**: VERIFICADO (padrão) ou RÁPIDO (ver "Modos de retomada").
 
 Configuração opcional: [.env.example](.env.example). Os valores são lidos de variáveis de ambiente.
 
@@ -56,6 +58,7 @@ Nomes de pastas e arquivos do AIR costumam conter **dados pessoais e sensíveis*
 - **Saída padrão sem dados identificáveis.** Console e relatórios diagnósticos trazem só status, contagens, referências (F1, D1…) e tipos de pendência. Os caminhos de arquivos gravados aparecem como `output/*/*/<execução>/<arquivo>`, porque os dois primeiros segmentos derivam do domínio e do setor.
 - **Exportação identificável só mediante confirmação explícita** (opções 5 e 6), e somente se permitida pelas políticas da organização.
 - **Erros** aparecem só pelo tipo, porque o texto pode citar pastas ou URLs. A exceção é a opção 3, que já exibe nomes. Para depuração local, `AIR_ORGANIZER_VERBOSE_ERRORS=1` mostra o texto completo. Não compartilhe essa saída.
+- **Checkpoints são pseudonimizados**, mas continuam sendo dados pessoais para a LGPD (a chave local permite reidentificar). Ver "Checkpoint e retomada".
 - **`output/` nunca é versionada** (ver [.gitignore](.gitignore)). Ela pode conter inventários identificáveis gravados com confirmação, inclusive por versões anteriores. Proteja o diretório, defina retenção e descarte conforme a política da organização. A ferramenta não apaga nada sozinha.
 - **Não envie** inventários, logs ou capturas de tela a serviços externos, incluindo assistentes de IA, sem autorização.
 - **Testes e documentação usam apenas dados sintéticos** (domínio `.test`, nomes fictícios). Não copie nomes reais de clientes, setores, pastas ou pessoas para o repositório.
@@ -90,9 +93,9 @@ Os testes de integração usam uma fixture HTML **sintética** em [tests/fixture
 ```text
 src/
 ├── air/        reader.ts (extração do DOM), navigator.ts (ambiente + paginação), folders.ts (subpasta: abrir/voltar), tree-navigator.ts (adaptador da leitura recursiva), session.ts (Chrome dedicado)
-├── core/       scanner.ts (paginação/cobertura), tree-scanner.ts (leitura recursiva DFS), records.ts (parsing), duplicates.ts (normalização)
+├── core/       scanner.ts (paginação/cobertura), tree-scanner.ts (leitura recursiva DFS e retomada), checkpoint.ts (modelo do checkpoint), records.ts (parsing), duplicates.ts (normalização)
 ├── safety/     scope-validator.ts (ações permitidas, escopo, URLs, caminhos)
-├── storage/    export.ts (relatórios diagnósticos e inventários JSON, escrita atômica)
+├── storage/    export.ts (relatórios diagnósticos e inventários JSON, escrita atômica), checkpoints.ts (checkpoints locais: chave, trava, retenção)
 ├── cli/        index.ts, args.ts
 └── types/      inventory.ts
 ```
@@ -131,6 +134,74 @@ Evidências:
 - **Bug corrigido.** Arquivos sem ícone reconhecido eram classificados pelos ícones da coluna Status (`file-search`, `file-check`). Com coluna de tipo presente, isso não acontece mais.
 - **Falha fechada observada.** Antes do suporte ao breadcrumb colapsado, a abertura no 3º nível foi interrompida por identidade não confirmada, como projetado.
 
+## Checkpoint e retomada (POC-01E)
+
+**Onde fica.** `%LOCALAPPDATA%\air-organizer\checkpoints\<instância>\<setor>\<pasta inicial>\<execução>\checkpoint.json`, no perfil do usuário e fora do repositório (configurável por `AIR_ORGANIZER_CHECKPOINT_DIR`, nunca dentro do repositório). Os três primeiros níveis são pseudônimos, não nomes.
+
+**O que guarda (minimização).** Só pseudônimos HMAC-SHA256 da URL, do nome, do caminho, da linha no pai e de cada página lida; contagens; status; motivos de pendência; limites; e datas. **Não guarda** nomes, caminhos, URLs, mensagens, itens, cookies, tokens nem conteúdo de documentos. A chave HMAC fica em `%LOCALAPPDATA%\air-organizer\checkpoint.key`, separada dos checkpoints. Quem tem só o checkpoint não consegue confirmar um nome por tentativa.
+
+**Consistência.** Cada gravação é atômica (arquivo temporário + rename) e leva um HMAC do documento. Arquivo truncado, editado ou gravado com outra chave é recusado. Uma trava impede duas sessões na mesma execução; a trava de um processo encerrado é substituída.
+
+**Retenção.** `AIR_ORGANIZER_CHECKPOINT_RETENTION_DAYS` (padrão 7 dias). Fora do prazo, o checkpoint não é retomado, porque a estrutura pode ter mudado, e a CLI oferece excluí-lo, com confirmação. Execuções concluídas não são oferecidas para retomada.
+
+**Como a retomada funciona.**
+
+1. Antes de qualquer clique: checkpoint íntegro e dentro do prazo, mesma instância, cliente e setor, e a pasta exibida precisa ser a pasta inicial gravada (URL, título e caminho).
+2. A mesma DFS é refeita a partir da pasta inicial. Uma subpasta **não é reaberta** quando a subárvore dela está *assentada* no checkpoint (lida, sem pendência que valha repetir) **e** a linha dela na listagem do pai, relida agora, é **idêntica** à registrada (nome, caminho, datas, status, descrição). Todas as outras pastas são relidas desde a página 1, sem duplicar itens.
+3. Pendências de limite, de leitura e de navegação (`max-*`, `read-incomplete`, `read-error`, `open-refused`, `navigation-lost`, `return-failed`, `run-aborted`) são tentadas de novo. Pendências do próprio conteúdo (homônimo, "Caminho" de outro ramo, tipo desconhecido, ciclo, visita repetida) são mantidas: repetir daria o mesmo resultado.
+4. **Os limites valem para a execução inteira**, incluindo o que foi reaproveitado. Com os mesmos limites que pararam a leitura, ela continua parcial: para avançar, aumente-os explicitamente. Eles nunca são aumentados automaticamente.
+5. A execução só fica **completa** se o que faltava for de fato lido nesta sessão, sem limite atingido e com a subárvore inteira completa. Uma execução parcial nunca vira completa só por ter sido retomada.
+
+### Alterações durante a análise (ADR-013)
+
+**O AIR pode mudar enquanto a ferramenta lê**: outras pessoas movem, criam ou renomeiam itens. O inventário **não é uma fotografia transacional**; cada pasta reflete o momento em que foi lida. Por isso, ao voltar de uma subpasta para o pai, a ferramenta separa duas perguntas:
+
+1. **É a mesma pasta? (identidade)** URL e título sempre; breadcrumb quando exibido; "Caminho" quando os dois lados o exibem. Divergência ou ambiguidade = `identity-mismatch`: a execução para imediatamente, sem novos cliques (falha fechada).
+2. **Ela mudou? (conteúdo)** Total do título e listagem da mesma página. Divergência = `content-changed`. A volta é aceita e:
+   - a pasta e os ancestrais deixam de ser completos, e a execução fica parcial e **não elegível para planejamento**;
+   - as subpastas ainda não abertas dessa pasta **não são abertas** (seria clicar a partir de uma listagem desatualizada) e ficam pendentes (`content-changed`);
+   - a pasta **não é relida automaticamente** na mesma sessão (sem loop). A retomada (opção 7) a relê, e a retomada rápida nunca reaproveita a subárvore afetada.
+
+`content-changed` registra uma divergência **observada**, não a sua causa. A ferramenta não afirma que houve alteração concorrente. Falhas em que não se consegue confirmar onde se está (prazo, controle ausente) aparecem como `navigation-failed`. O console mostra as três contagens, sem nomes.
+
+### Modos de retomada
+
+Os dois modos usam a mesma DFS e as mesmas regras de identidade, limites e completude. A diferença é só se subárvores já concluídas podem ser reaproveitadas sem reabrir.
+
+| | **VERIFICADO** (padrão) | **RÁPIDO** |
+|---|---|---|
+| Subpastas concluídas no checkpoint | reabertas e relidas desde a página 1 | não reabertas, se a linha delas no pai for idêntica |
+| Conteúdo interno | revalidado: páginas, registros, contagens e pendências | **não revalidado**: mudanças dentro delas não são detectadas |
+| Comparação com o checkpoint | cada pasta relida sai como inalterada, alterada ou nova; subpastas que sumiram são contadas como removidas | idem, só para as pastas relidas |
+| Custo | o de uma leitura nova (o checkpoint dá continuidade e comparação, não economia) | só o que estava pendente |
+| Base para planejar movimentações | sim, se o resultado for **completo** | **nunca** (`eligibleForPlanning: false`), mesmo completo |
+
+O resultado e o relatório diagnóstico trazem `verification.contentRevalidated` e `verification.eligibleForPlanning`. A CLI nunca apresenta o modo rápido como equivalente ao verificado. **Nenhum modo garante consistência transacional:** o AIR pode mudar durante a própria leitura. Como o checkpoint não guarda nomes, no inventário detalhado de uma retomada rápida as pastas reaproveitadas aparecem só com contagens.
+
+## Validação no AIR real (POC-01E, 03/11/2026)
+
+Somente leitura, saída só diagnóstica, pastas escolhidas e abertas pelo usuário. Nenhum nome foi exibido nem exportado.
+
+**Paginador** (pasta de 1494 itens, 50 páginas de 30; nenhuma subpasta aberta):
+
+- **Página ativa:** botão numérico com `bg-primary`, único, sempre visível. Sem `aria-current`.
+- **Números exibidos:** a primeira, a atual ± 1 e a última, com `<span>...</span>` em cada lacuna. Página 1: `[1][2][...][50]`; página 4: `[1][...][3][4][5][...][50]`. Antes, a fixture mostrava "1, 2, atual, última"; foi corrigida.
+- **Campo "Ir":** existe. É um `<input type="number" placeholder="Página" min="1" max="<última>">` com botão "Ir". **Não foi preenchido nem usado.** Ele exige aprovação arquitetural (digitação em campo).
+- **Leitura sequencial:** 4 páginas, 120 itens, página ativa conferida em cada uma (1 a 4).
+- **Saltos verificados:** 4→3, 3→1, 1→4 (oculta a partir da 1), 4→2 (oculta a partir da 4) e 2→1. Todos confirmados, com 1 a 3 cliques numéricos.
+
+**CLI, opções 6 e 7** (pasta de 2º nível com 14 filhos; limites: profundidade 2, 5 pastas, 150 itens, 2 páginas por pasta):
+
+| Etapa | Resultado |
+|---|---|
+| Opção 6, processo encerrado à força depois da 3ª pasta | checkpoint `running` íntegro, 16 pastas registradas, só pseudônimos e códigos; trava órfã deixada no disco |
+| Menu seguinte | opção 7 oferecida (1 checkpoint válido; trava órfã reconhecida) |
+| Opção 7, modo RÁPIDO, mesmos limites | modo exibido; pasta inicial e F3 relidas (2 inalteradas); F2 **reaproveitada sem reabrir**; resultado rotulado "NÃO REVALIDADO" |
+| **Achado** | ao voltar de F3 (3º nível, **2 páginas lidas**) para a pasta inicial: `return-failed`. A execução foi interrompida sem novos cliques (falha fechada), e o checkpoint segue íntegro e retomável |
+| Opção 7, modo VERIFICADO | **não executada**: a validação foi interrompida no comportamento inesperado, como determinado |
+
+**Diagnóstico do achado (concluído):** a hipótese do histórico foi **refutada**: paginar não cria entrada no histórico, e o "voltar" leva ao pai. **Causa confirmada:** O AIR **mantém a página corrente ao voltar**. Numa pasta estável, confirmada pelo checkpoint, o pai estava antes na página 1, com 8 linhas e total 8. Depois de abrir uma subpasta, ir à página 2 e voltar uma vez, ele apareceu **sem página ativa, com 0 linhas e total 8**. Correção: antes de voltar, a subpasta é reposicionada na página em que foi aberta (página ativa e listagem conferidas). Depois da volta, o pai precisa estar na página em que foi lido e exibir linhas quando o total indica itens. Senão, a volta é recusada (`page-mismatch` ou `empty-listing`, categoria `navigation-failed`) e a execução para sem novos cliques. Uma listagem incomparável nunca é aceita como volta válida.
+
 ## Leitura recursiva (POC-01D, 29/10/2026)
 
 **Algoritmo: DFS.** Sem montar URLs, cada deslocamento é um clique verificado: abrir uma subpasta ou voltar ao pai. Na DFS o caminho de navegação é a própria pilha, então cada pasta é aberta uma vez e cada volta é para o pai imediato. Isso mantém o histórico do navegador coerente com a pilha, o que importa porque a volta a partir do 3º nível usa a seta "voltar" do AIR. A recursão fica em `core` (sem Playwright), atrás da interface `TreeNavigator`.
@@ -147,7 +218,7 @@ Evidências:
 - `navigation-lost`, `return-failed`: falha **depois** de um clique, que interrompe a execução inteira sem novos cliques;
 - `run-aborted`: o restante da fila depois de uma interrupção.
 
-**Reposicionamento.** Antes de abrir uma subpasta que está em outra página do pai, a ferramenta clica no **número da página** no paginador e exige que o conteúdo seja idêntico ao lido antes.
+**Reposicionamento.** Antes de abrir uma subpasta que está em outra página do pai, a ferramenta volta a essa página e exige que o conteúdo seja idêntico ao lido antes. Desde a POC-01E, isso funciona também com páginas escondidas pelas reticências: ela clica no número visível mais próximo abaixo da página e repete, confirmando a página ativa e a mudança da listagem a cada clique. No AIR real o paginador mostra a atual e as vizinhas (`[1][...][3][4][5][...][50]`), então os números bastam; "próxima" fica como alternativa para paginadores sem vizinhas. As reticências nunca são clicadas, e o campo "Ir" não é usado (ver Limitações). Loop, página ativa não identificada, conteúdo diferente ou excesso de passos interrompem a abertura (falha fechada). O scanner também passou a conferir a página ativa: ler a partir de uma página diferente da 1, ou um "próxima" que pule páginas, torna a leitura parcial (`page-mismatch`).
 
 ### Validação real
 
@@ -173,8 +244,10 @@ Ainda **não validado** no AIR real:
 - outros tipos de arquivo além de PDF (aceitos pelo padrão `<img alt="<tipo> icon">`, sem observação real);
 - subpasta com **mais de uma página** (validada só em fixture; a paginação foi validada na raiz na POC-01B);
 - descida ao 2º nível de recursão, porque o orçamento de itens acabou antes;
-- reposicionamento para páginas que não aparecem no paginador (por exemplo, a página 7 quando só aparecem 1 2 … N): a subpasta fica pendente;
-- o campo "Ir" do paginador;
+- volta ao pai com conteúdo do pai alterado durante a leitura: tratada pelo ADR-013 (`content-changed`), validada em fixture; validação real na seção "Validação no AIR real (POC-01E)";
+- reposicionamento para página oculta **ao abrir uma subpasta** (validado na mesma pasta, por saltos entre páginas lidas, mas não antes de uma abertura real);
+- retomada VERIFICADA no AIR real (validada só em fixture e simulação);
+- o campo "Ir" (existe, mas não é usado sem aprovação). Sem ele, alcançar a página *k* custa até *k* cliques numéricos, sempre dentro de `maxPagesPerFolder`;
 - homônimos na mesma página (a abertura é recusada; não há alternativa ainda);
 - estabilidade do ID da URL como identificador de pasta;
 - execução da opção 6 pela CLI interativa (a validação usou as mesmas funções por script).
@@ -184,6 +257,9 @@ Outras limitações:
 - "Registros por página" variou entre sessões (30 e 50). A ferramenta não depende desse valor.
 - O contador "X de N linhas(s) selecionadas" representa **só a página exibida**. Ele nunca é usado como total da pasta.
 - Cliente e setor não têm seletor validado na UI: são informados pelo operador e não são confirmados pela ferramenta.
-- Sem checkpoint nem retomada: uma leitura interrompida precisa ser refeita.
+- A retomada relê desde a página 1 toda pasta em que entra (o checkpoint não guarda os nomes necessários para abrir pastas a partir de uma página intermediária).
+- Na retomada RÁPIDA, mudanças dentro de subárvores reaproveitadas não são detectadas, e o resultado nunca é elegível para planejamento. Use a VERIFICADA.
+- A retomada VERIFICADA custa o mesmo que uma leitura nova.
+- A opção 2 lida a partir de uma página diferente da 1 fica parcial (`page-mismatch`): volte à página 1 antes de analisar.
 - Os nomes dos diretórios em `output/` derivam do domínio e do setor (com hash). Eles ficam só no disco local e não são exibidos no console.
 - Os títulos das abas são exibidos quando há mais de uma aba aberta no Chrome dedicado, para que você escolha a do AIR.

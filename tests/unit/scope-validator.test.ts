@@ -1,3 +1,4 @@
+import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { assertNotPersonalProfile } from '../../src/air/session.js';
@@ -134,6 +135,7 @@ describe('assertNotPersonalProfile', () => {
   it('recusa perfis pessoais do Chrome e diretórios dentro do repositório', () => {
     expect(() => assertNotPersonalProfile('C:/Users/u/AppData/Local/Google/Chrome/User Data')).toThrow(SafetyViolation);
     expect(() => assertNotPersonalProfile(path.join(process.cwd(), 'chrome-profile'))).toThrow(SafetyViolation);
-    expect(() => assertNotPersonalProfile('C:/Users/u/AppData/Local/air-organizer/chrome-profile')).not.toThrow();
+    // Caminho absoluto fora do repositório em qualquer SO ("C:/..." não é absoluto no Linux da CI).
+    expect(() => assertNotPersonalProfile(path.join(os.tmpdir(), 'air-organizer', 'chrome-profile'))).not.toThrow();
   });
 });

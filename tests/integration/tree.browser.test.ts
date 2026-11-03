@@ -1,7 +1,9 @@
+import { createHmac } from 'node:crypto';
 import { chromium, type Browser, type Page } from 'playwright';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createAirTreeNavigator } from '../../src/air/tree-navigator.js';
-import { diagnosticReport, formatTreeEvent, scanTree } from '../../src/core/tree-scanner.js';
+import type { CheckpointFolder } from '../../src/core/checkpoint.js';
+import { diagnosticReport, formatTreeEvent, scanTree, type TreeCheckpointSnapshot } from '../../src/core/tree-scanner.js';
 import type { TreeEvent, TreeLimits } from '../../src/types/inventory.js';
 import { airTreeHtml, type TreeFixtureOptions, type TreeNode } from '../fixtures/air-tree.js';
 
@@ -108,6 +110,11 @@ describe('leitura recursiva com o adaptador do AIR (fixture)', () => {
     const r = await scanTree(createAirTreeNavigator(page, {}, { ...NAV, timeoutMs: 800 }), WIDE);
     expect(r).toMatchObject({ status: 'failed', abort: { reason: 'navigation-lost' } });
     expect(r.folders.find((f) => f.name === 'B')?.reasons).toEqual(['navigation-lost']);
+    // Assinatura diagnóstica segura: URL mudou, título não confere (outra pasta).
+    expect(r.abort?.diagnostic).toMatchObject({ code: 'timeout', checks: { conditions: { urlChanged: true, titleMatches: false } } });
+    const report = JSON.stringify(diagnosticReport(r));
+    expect(report).toContain('titleMatches');
+    for (const s of ['Setor', 'fixture.test', 'my-air']) expect(report).not.toContain(s);
     expect(await read<string[]>(page, '__visits')).toEqual(['a', 'a1', 'root', 'c']); // parou na pasta errada
     await page.context().close();
   });
@@ -173,6 +180,71 @@ describe('leitura recursiva com o adaptador do AIR (fixture)', () => {
     ]);
     expect(r.status).toBe('complete');
     expect(await read<string[]>(page, '__forbiddenClicks')).toEqual([]);
+    await page.context().close();
+  });
+
+  it('retomada pela UI: interrompida, retoma da mesma pasta inicial sem reabrir subárvores assentadas', async () => {
+    const pseudonymize = (v: string) => createHmac('sha256', 'k').update(v).digest('hex').slice(0, 32);
+    let saved: CheckpointFolder[] = [];
+    const checkpoint = { pseudonymize, save: async (s: TreeCheckpointSnapshot) => void (saved = s.folders) };
+
+    const first = await open(TREE, 'root', { misrouteTo: { b: 'c' } });
+    const r1 = await scanTree(createAirTreeNavigator(first, {}, { ...NAV, timeoutMs: 800 }), WIDE, { checkpoint });
+    expect(r1).toMatchObject({ status: 'failed', abort: { reason: 'navigation-lost' } });
+    await first.context().close();
+
+    // O operador abre de novo a pasta inicial (aqui, a fixture já começa nela).
+    const second = await open(TREE, 'root', { renderDelayMs: 30 });
+    const r2 = await scanTree(createAirTreeNavigator(second, {}, NAV), WIDE, { checkpoint: { ...checkpoint, resume: { from: saved, mode: 'fast' } } });
+    expect(r2.status).toBe('complete');
+    expect(r2.resume?.reusedFolders).toBe(2); // A e A1
+    expect(await read<string[]>(second, '__visits')).toEqual(['b', 'root', 'c', 'root', 'e', 'e1', 'root']);
+    expect(await read<string[]>(second, '__forbiddenClicks')).toEqual([]);
+    expect(r2.totals).toMatchObject({ foldersRead: 7, items: 13 });
+    await second.context().close();
+  });
+
+  it('retomada VERIFICADA pela UI: reabre todas as pastas e é elegível para planejamento', async () => {
+    const pseudonymize = (v: string) => createHmac('sha256', 'k').update(v).digest('hex').slice(0, 32);
+    let saved: CheckpointFolder[] = [];
+    const checkpoint = { pseudonymize, save: async (s: TreeCheckpointSnapshot) => void (saved = s.folders) };
+    const first = await open(TREE, 'root', { misrouteTo: { b: 'c' } });
+    await scanTree(createAirTreeNavigator(first, {}, { ...NAV, timeoutMs: 800 }), WIDE, { checkpoint });
+    await first.context().close();
+
+    const second = await open(TREE, 'root');
+    const r = await scanTree(createAirTreeNavigator(second, {}, NAV), WIDE, { checkpoint: { ...checkpoint, resume: { from: saved, mode: 'verified' } } });
+    expect(r.status).toBe('complete');
+    expect(r.resume).toMatchObject({ mode: 'verified', reusedFolders: 0 });
+    expect(r.verification.eligibleForPlanning).toBe(true);
+    expect(await read<string[]>(second, '__visits')).toEqual(['a', 'a1', 'root', 'b', 'root', 'c', 'root', 'e', 'e1', 'root']);
+    expect(await read<string[]>(second, '__forbiddenClicks')).toEqual([]);
+    await second.context().close();
+  });
+
+  it('achado real POC-01E: se paginar criar entrada no histórico, a volta pelo "voltar" do 3º nível falha fechada', async () => {
+    // A1 (3º nível, 2 páginas) volta pelo "voltar" (histórico), porque o pai está colapsado no breadcrumb.
+    const page = await open(TREE, 'root', { pagingPushesHistory: true });
+    const r = await scanTree(createAirTreeNavigator(page, {}, { ...NAV, timeoutMs: 800 }), WIDE);
+    expect(r).toMatchObject({ status: 'failed', abort: { reason: 'return-failed' } });
+    expect(r.folders.find((f) => f.name === 'A')?.reasons).toContain('return-failed');
+    expect(await read<string[]>(page, '__visits')).toEqual(['a', 'a1']); // nenhum clique depois da falha
+    expect(await read<string[]>(page, '__forbiddenClicks')).toEqual([]);
+    await page.context().close();
+  });
+
+  it('ADR-013 pelo adaptador real: pai alterado durante a leitura vira content-changed, sem cliques na listagem antiga', async () => {
+    // Ao abrir A, o item E some da pasta inicial: na volta, a identidade confere e o total não.
+    const page = await open(TREE, 'root', { mutateOnVisit: { a: 'e' } });
+    const r = await scanTree(createAirTreeNavigator(page, {}, NAV), WIDE);
+    expect(r.status).toBe('partial');
+    expect(r.abort).toBeUndefined();
+    expect(r.navigation).toEqual({ contentChanged: 1, identityMismatch: 0, navigationFailed: 0 });
+    expect(r.folders[0]).toMatchObject({ status: 'partial', subtreeStatus: 'partial', reasons: ['content-changed'] });
+    expect(r.folders.filter((f) => ['B', 'C', 'E'].includes(f.name ?? '')).map((f) => f.reasons)).toEqual([['content-changed'], ['content-changed'], ['content-changed']]);
+    expect(await read<string[]>(page, '__visits')).toEqual(['a', 'a1', 'root']); // nada aberto depois
+    expect(await read<string[]>(page, '__forbiddenClicks')).toEqual([]);
+    expect(r.verification.eligibleForPlanning).toBe(false);
     await page.context().close();
   });
 
