@@ -2,7 +2,7 @@
 
 Ferramenta local e supervisionada para auxiliar implantadores na organização documental do AIR (Printer do Brasil). Funciona com qualquer instância, cliente, cidade ou setor: é **multiambiente e multissetor**, e nenhum identificador de instância, cliente, setor ou pasta está fixo no código.
 
-**Estágio atual: POC-01E, estritamente somente leitura.** A ferramenta lê a listagem exibida pela interface oficial do AIR, percorre a paginação (inclusive páginas escondidas por reticências), entra em subpastas por cliques verificados (inclusive em profundidade, com limites), grava checkpoints para retomar leituras interrompidas, aponta suspeitas de duplicidade por nome e exporta relatórios. Ela não move, cria, exclui, edita nem renomeia nada. Planejamento (POC-02) e movimentação (POC-03) **não estão implementados**.
+**Estágio atual: POC-02A, estritamente somente leitura.** A ferramenta lê a listagem exibida pela interface oficial do AIR, percorre a paginação (inclusive páginas escondidas por reticências), entra em subpastas por cliques verificados (inclusive em profundidade, com limites), grava checkpoints para retomar leituras interrompidas e, sobre inventários recursivos exportados, produz diagnósticos estruturais locais para revisão humana. Ela não move, cria, exclui, edita nem renomeia nada. Planejamento operacional (POC-02B) e movimentação (POC-03) **não estão implementados**.
 
 Veja [ARCHITECTURE.md](ARCHITECTURE.md) para os princípios, as decisões registradas e o plano de entregas.
 
@@ -36,6 +36,7 @@ A URL da instância é informada pelo usuário (argumento `--url`, variável `AI
 5. Exportar inventário
 6. Analisar árvore             (recursivo controlado, com limites e checkpoint)
 7. Retomar análise de árvore  (só aparece com checkpoint válido)
+8. Diagnóstico estrutural     (sobre inventário recursivo exportado; sem navegador)
 0. Sair
 ```
 
@@ -48,6 +49,7 @@ A URL da instância é informada pelo usuário (argumento `--url`, variável `AI
 7. **Opção 5** grava sempre `output/<instância>/<setor>/<execução>/inventory-diagnostic.json`, **sem dados identificáveis**. O `inventory.json`, com nomes, caminhos e URLs, só é gravado se você confirmar explicitamente (mesma política da opção 6).
 8. **Opção 6** lê a pasta exibida e seus descendentes em profundidade (DFS), dentro de limites que você confirma: `maxDepth`, `maxFolders`, `maxItems` e `maxPagesPerFolder`. Os padrões são conservadores (1 / 5 / 100 / 2). Ao atingir um limite, a leitura para e fica **parcial**, e os limites nunca são aumentados automaticamente. O console mostra só referências (F1, F2…), contagens, status e motivos. É gravado o `tree-diagnostic.json`, também sem dados identificáveis. O `tree-inventory.json`, com nomes e caminhos, só é gravado se você confirmar explicitamente no fim. Durante a leitura, o console mostra o progresso (`[executando] pastas · itens · páginas · pendências`), e o resultado sai como CONCLUÍDO, PARCIAL ou INTERROMPIDO, com os limites utilizados e as pendências. A cada passo é gravado um **checkpoint** (ver abaixo).
 9. **Opção 7** só aparece quando existe checkpoint válido. Ela retoma uma execução a partir da **mesma pasta inicial**, que você abre manualmente no Chrome dedicado (nenhuma URL é montada). Instância, cliente, setor e pasta inicial precisam coincidir com os gravados; senão, a retomada é recusada com o motivo. Você escolhe o **modo**: VERIFICADO (padrão) ou RÁPIDO (ver "Modos de retomada").
+10. **Opção 8** lista `tree-inventory.json` locais e executa o diagnóstico sem abrir o navegador ou acessar o AIR. O motor valida a estrutura do inventário e apresenta suspeitas de nomes repetidos, variações de grafia e padrões de hierarquia, sempre com referências locais e revisão humana. Inventários parciais, FAST, antigos ou sem verificação suficiente ficam marcados como exploratórios; inconsistências são recusadas e não produzem achados. O relatório sem nomes é salvo em `output/`; nomes e caminhos só são exibidos ou salvos num relatório detalhado após confirmação explícita.
 
 Configuração opcional: [.env.example](.env.example). Os valores são lidos de variáveis de ambiente.
 

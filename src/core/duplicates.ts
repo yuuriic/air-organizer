@@ -35,10 +35,10 @@ export function normalizeName(
   return value.trim();
 }
 
-/** Regras sem as quais o grupo deixaria de ser equivalente. */
-export function requiredRules(names: readonly string[]): NormalizationRule[] {
-  return ALL_RULES.filter((rule) => {
-    const without = ALL_RULES.filter((r) => r !== rule);
+/** Regras (dentre `among`) sem as quais o grupo deixaria de ser equivalente. */
+export function requiredRules(names: readonly string[], among: readonly NormalizationRule[] = ALL_RULES): NormalizationRule[] {
+  return among.filter((rule) => {
+    const without = among.filter((r) => r !== rule);
     return new Set(names.map((n) => normalizeName(n, without))).size > 1;
   });
 }

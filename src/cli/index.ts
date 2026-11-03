@@ -15,6 +15,8 @@ import { formatTreeEvent, scanTree } from '../core/tree-scanner.js';
 import { assertReadOnlyMode, fingerprintOf, sanitizeUrl, validateAnalysisScope } from '../safety/scope-validator.js';
 import { CheckpointStore, DEFAULT_RETENTION_DAYS, defaultCheckpointLocations, type CheckpointEntry, type CheckpointSession } from '../storage/checkpoints.js';
 import { displayPath, exportInventoryResult, exportTreeResult, newRunId } from '../storage/export.js';
+import { describeLocalFailure, exportStructuralReport, listTreeInventories, readInventory } from '../storage/inventory-files.js';
+import { analyzeStructure, formatFinding } from '../core/structural-diagnostics.js';
 import type { AirEnvironment, Identified, Inventory, ResumeMode, TreeLimits, TreeResult } from '../types/inventory.js';
 
 const READ_ONLY = true;
@@ -493,9 +495,64 @@ Modo de retomada:
   await runTree(page, limits, session, { from: checkpoint.folders, mode });
 }
 
+/* ───────────── Diagnóstico estrutural (POC-02A) ───────────── */
+
+const INVENTORY_MAX_AGE_DAYS = Number(process.env.AIR_ORGANIZER_INVENTORY_MAX_AGE_DAYS ?? 7);
+
+const ELIGIBILITY_LABEL = {
+  'planning-eligible': 'ELEGÍVEL para planejamento: leitura completa, revalidada, sem divergência e recente. Os achados continuam exigindo revisão humana.',
+  exploratory: 'EXPLORATÓRIO: os achados servem para exploração e NÃO podem fundamentar planos operacionais.',
+  rejected: 'RECUSADO: inventário inconsistente ou ilegível; nenhum achado foi produzido.',
+} as const;
+
+/**
+ * Analisa um inventário recursivo já exportado (tree-inventory.json). Sem navegador e sem acesso
+ * ao AIR. Por padrão, só referências (F1...), regras, certeza e contagens; nomes só com confirmação.
+ */
+async function structuralDiagnostics(): Promise<void> {
+  const inventories = await listTreeInventories();
+  if (inventories.length === 0) {
+    console.log('\nNenhum inventário detalhado (tree-inventory.json) em output/. Ele é gravado pelas opções 6/7, com confirmação.');
+    return;
+  }
+  console.log('\nInventários recursivos detalhados (análise local, sem navegador):');
+  for (const [i, e] of inventories.entries()) console.log(`  ${i + 1}. ${displayPath(e.file)} · ${e.status ?? '?'} · finalizado em ${e.finishedAt ?? '?'}`);
+  const entry = inventories[Number(await ask('Número do inventário: ')) - 1];
+  if (!entry) return;
+
+  const report = analyzeStructure(await readInventory(entry.file), { now: new Date(), maxAgeDays: INVENTORY_MAX_AGE_DAYS });
+  console.log(`\nElegibilidade: ${ELIGIBILITY_LABEL[report.eligibility.status]}`);
+  if (report.eligibility.reasons.length) console.log(`  Motivos: ${report.eligibility.reasons.join('; ')}`);
+  if (report.eligibility.status === 'rejected') return;
+  const c = report.coverage;
+  console.log(`  Cobertura: ${c.folders} pasta(s) no inventário; ${c.foldersWithName} com nome; ${c.foldersRead} lida(s); ${c.foldersComplete} com listagem completa.`);
+  const s = report.summary;
+  console.log(
+    `  Achados: ${s.findings} (duplicidade possível ${s.byCategory['possible-duplicate']} · nomenclatura ${s.byCategory['inconsistent-naming']} · hierarquia ${s.byCategory['divergent-hierarchy']})`,
+  );
+  for (const f of report.findings) console.log(`    ${formatFinding(f)}`);
+  console.log('  Todo achado exige revisão humana. Nenhum renomear, mover ou mesclar é sugerido.');
+
+  if (report.findings.length > 0) {
+    console.log('\nOs nomes das pastas podem conter dados pessoais/sensíveis.');
+    if (await confirm('Exibir os nomes envolvidos neste console?')) {
+      for (const f of report.findings) {
+        console.log(`\n  ${f.id} ${f.rule}`);
+        for (const e of f.folders) console.log(`    ${e.ref}  ${e.path ?? e.name ?? '(sem nome no inventário)'}`);
+        if (f.names?.variants) console.log(`    grafias: ${f.names.variants.map((v) => JSON.stringify(v)).join(' · ')}`);
+        if (f.names?.common) console.log(`    em comum: ${f.names.common.join(' · ')}`);
+        for (const [ref, names] of Object.entries(f.names?.onlyIn ?? {})) console.log(`    só em ${ref}: ${names.join(' · ') || '-'}`);
+      }
+    }
+  }
+  console.log('\nO relatório sem nomes é sempre gravado. O detalhado contém nomes e caminhos (dados possivelmente pessoais/sensíveis).');
+  const detailed = await confirm('Gravar também o relatório detalhado? Somente se permitido pelas políticas da empresa.');
+  for (const file of await exportStructuralReport(report, entry.file, { detailed })) console.log(`  Gravado: ${displayPath(file)}`);
+}
+
 function menu(resumable: number): string {
   return `
-AIR Organizer — POC-01 (somente leitura)
+AIR Organizer — POC-02A (somente leitura)
 
 1. Verificar conexão com AIR
 2. Analisar pasta atual
@@ -503,7 +560,8 @@ AIR Organizer — POC-01 (somente leitura)
 4. Exibir possíveis duplicidades
 5. Exportar inventário
 6. Analisar árvore             (recursivo controlado, com limites e checkpoint)
-${resumable > 0 ? `7. Retomar análise de árvore  (${resumable} checkpoint(s) válido(s))\n` : ''}0. Sair
+${resumable > 0 ? `7. Retomar análise de árvore  (${resumable} checkpoint(s) válido(s))\n` : ''}8. Diagnóstico estrutural     (de inventário exportado; sem navegador)
+0. Sair
 `;
 }
 
@@ -522,12 +580,20 @@ async function main(): Promise<void> {
       else if (option === '5') await exportLast();
       else if (option === '6') await analyzeTree();
       else if (option === '7' && resumable > 0) await resumeTree();
+      else if (option === '8') await structuralDiagnostics();
       else console.log('Opção inválida.');
     } catch (error) {
       if (error instanceof InputClosed) break;
       // Motivos de recusa da retomada não contêm nomes, caminhos nem URLs.
       if (error instanceof ResumeRejectedError) {
         console.error(`\nRetomada recusada [${error.rejection.code}]: ${error.rejection.message}`);
+        continue;
+      }
+      // Opção 8: processamento local, sem navegador. Motivo sem caminhos nem trechos do arquivo.
+      if (option === '8') {
+        console.error(`\nDiagnóstico estrutural não concluído: ${describeLocalFailure(error)}`);
+        if (VERBOSE_ERRORS) console.error(`  (${error instanceof Error ? `${error.name}: ${error.message}` : String(error)})`);
+        else console.error('  Confira o inventário em output/ ou gere outro pelas opções 6/7. Para ver o texto do erro, defina AIR_ORGANIZER_VERBOSE_ERRORS=1.');
         continue;
       }
       // Mensagens de erro podem citar pastas, caminhos ou URLs. Só a opção 3 (que já exibe

@@ -128,12 +128,14 @@ air-organizer/
 │   │   ├── tree-scanner.ts    # leitura recursiva DFS com limites, status por subárvore e retomada
 │   │   ├── checkpoint.ts      # modelo puro do checkpoint: pseudônimos, integridade, validação
 │   │   ├── records.ts         # parsing das linhas e classificação de tipo
+│   │   ├── structural-diagnostics.ts # diagnóstico estrutural determinístico (POC-02A)
 │   │   └── duplicates.ts      # normalização e suspeitas de duplicidade
 │   ├── safety/
 │   │   └── scope-validator.ts # ações permitidas, escopo, URLs, caminhos de saída
 │   ├── storage/
 │   │   ├── export.ts          # relatórios diagnósticos e inventários JSON (escrita atômica)
-│   │   └── checkpoints.ts     # checkpoints locais: chave HMAC, escrita atômica, trava, retenção
+│   │   ├── checkpoints.ts     # checkpoints locais: chave HMAC, escrita atômica, trava, retenção
+│   │   └── inventory-files.ts # inventários exportados e relatórios estruturais em output/
 │   ├── cli/
 │   │   ├── index.ts           # menu interativo
 │   │   └── args.ts            # --url / AIR_ORGANIZER_URL
@@ -415,6 +417,37 @@ Nomes de arquivos iguais **não provam** conteúdo igual. Sem hash ou metadados 
 
 A consolidação deve comparar descendentes antes de mover uma pasta inteira. Se duas pastas têm subpastas homônimas, o planner cria operações dependentes para consolidar o conteúdo primeiro; não presume merge automático no AIR.
 
+### 8.4 Motor de diagnóstico estrutural (POC-02A, implementado)
+
+`core/structural-diagnostics.ts` é um motor **determinístico e puro** (sem navegador, sistema de arquivos ou rede). A entrada é um inventário recursivo exportado (`tree-inventory.json`, identificável, gravado só com confirmação); a saída são achados para **revisão humana**. Mesmo inventário + mesma data de avaliação = mesmo relatório, independente da ordem das pastas no arquivo. Nenhum achado recomenda renomear, mover ou mesclar.
+
+**Validação antes das regras (falha segura).** Referências únicas, uma única pasta inicial, pais existentes, profundidade coerente, contagens iguais à listagem, cada subpasta pareada com a linha correspondente do pai (nome) e caminho coerente com o do pai. Qualquer divergência = inventário **recusado**, sem achados.
+
+**Elegibilidade (reutiliza a leitura, não recalcula):**
+
+| Estado | Quando |
+|---|---|
+| `planning-eligible` | `verification.eligibleForPlanning` verdadeiro (completa, revalidada, sem `content-changed`) e inventário com até 7 dias (`AIR_ORGANIZER_INVENTORY_MAX_AGE_DAYS`) |
+| `exploratory` | consistente, mas com qualquer motivo: `status-partial`, `status-failed`, `aborted`, `fast-resume`, `reused-folders`, `content-changed`, `not-eligible-for-planning`, `stale`, `legacy-format` (exportação anterior à POC-01E) |
+| `rejected` | inconsistente, ilegível ou sem nomes (`tree-diagnostic.json`) |
+
+Só `planning-eligible` poderá fundamentar planos operacionais (POC-02B). Achados exploratórios servem só para exploração.
+
+**Regras iniciais (cada achado registra a regra, a certeza e as regras de normalização aplicadas):**
+
+| Categoria | Regra | O que detecta | Certeza |
+|---|---|---|---|
+| Possível duplicidade | `DUP-SIBLING-EXACT` | pastas irmãs com nomes idênticos | `exact` |
+| | `DUP-SIBLING-NORMALIZED` | pastas irmãs equivalentes por caixa, acento, espaço ou pontuação | `normalized` (+ `matchedBy`) |
+| Nomenclatura | `NAME-VARIANTS` | o mesmo nome grafado de formas diferentes (caixa, acento, espaços) em **pais diferentes** | `normalized` |
+| | `NAME-SPACING` | espaço no início, no fim ou repetido | `exact` |
+| Hierarquia | `HIER-NESTED-SAME-NAME` | subpasta com o mesmo nome da pasta que a contém | `exact`/`normalized` |
+| | `HIER-EQUIVALENT-CHILDREN` | pastas equivalentes em pais diferentes, ambas com listagem completa, com pelo menos 2 subpastas em comum e sobreposição (Jaccard) de pelo menos 50%, mas não idênticas | `structural` |
+
+"Certeza" é da **detecção**, sem probabilidades: textos idênticos, equivalentes pelas regras listadas ou padrão estrutural dentro dos limiares. Decisões conservadoras: duplicidade só entre irmãs (o mesmo nome em pais diferentes pode ser legítimo, como anos); grafias diferentes dentro de um único pai já são o achado de irmãs; hierarquia só com listagens completas; estruturas com pouco em comum não geram achado; nomes de arquivos não são comparados.
+
+**Privacidade.** O relatório completo é identificável e fica em `output/` (`structural-diagnostics-detailed.json`, só com confirmação). O padrão (console e `structural-diagnostics.json`) é redigido: referências da execução (F1…), regras, certeza, contagens e limitações, sem nomes, caminhos nem grafias. CLI: opção 8, sem navegador.
+
 ## 9. Planejador e dry-run
 
 Entrada: inventário completo ou explicitamente parcial, pasta principal selecionada, candidatos aprovados e limites de execução.
@@ -541,6 +574,7 @@ Critérios de aceite e situação:
 Critérios de aceite:
 
 - Detectar nomes equivalentes por caixa, acento e pontuação (exemplos fictícios: `PLANETAS`/`Planetas`, `ORBITAS`/`ÓRBITAS`) na mesma estrutura. A normalização e as suspeitas já existem desde a POC-01.
+- **POC-02A (entregue):** motor de diagnóstico estrutural (§8.4): duplicidade entre irmãs, nomenclatura inconsistente e hierarquia divergente, com elegibilidade herdada da leitura.
 - Distinguir similaridade de nomes de duplicidade documental comprovada.
 - Exigir escolha explícita da pasta principal.
 - Impedir planos com ciclo, setor divergente ou destino ambíguo.
@@ -607,10 +641,15 @@ Critérios de aceite:
 - **ADR-011 — Retomada em dois modos (POC-01E):** pastas em que se entra são relidas desde a página 1. No modo RÁPIDO, subárvores assentadas com a linha no pai idêntica são reaproveitadas, e o resultado é marcado como não revalidado, nunca elegível para planejamento. No modo VERIFICADO (padrão), tudo é relido e comparado com o checkpoint. Limites cumulativos por execução; parcial nunca vira completa só por retomada; sem promessa de consistência transacional (§7.7).
 - **ADR-012 — Reposicionamento só com controles validados (POC-01E):** número visível (e "próxima" como alternativa), passo a passo, com página ativa e listagem confirmadas; reticências nunca clicadas. O campo "Ir" existe no AIR real, mas fica fora até haver aprovação específica para digitação em campo (§7.8).
 - **ADR-013 — Identidade de navegação x consistência de conteúdo (POC-01E):** na volta ao pai, identidade divergente interrompe (`identity-mismatch`); identidade confirmada com total ou listagem divergentes é aceita como `content-changed`, que invalida a completude da pasta e dos ancestrais, impede cliques a partir da listagem antiga, não gera releitura em loop, impede reaproveitamento na retomada e impede a elegibilidade para planejamento. Diagnósticos separados e sem dados identificáveis. O inventário não é uma fotografia transacional (§7.8).
+- **ADR-014 — Diagnóstico estrutural determinístico e desacoplado (POC-02A):** motor puro sobre o inventário exportado, sem navegador, rede ou banco de dados; valida a consistência antes das regras (inconsistência = recusado, sem achados); herda a elegibilidade da leitura (só `planning-eligible` fundamenta planos); regras conservadoras e nomeadas, certeza sem probabilidades, revisão humana obrigatória, sem sugestões de renomear/mover/mesclar; saída padrão redigida (§8.4).
 
 ## 18. Próxima ação concreta
 
-Antes de abrir PR para uso operacional: (1) diagnosticar, só por leitura, o achado do `return-failed` (§7.8): `history.length` antes e depois de trocar de página numa subpasta; (2) decidir e implementar a correção da volta do 3º nível após paginação; (3) validar no AIR real a retomada VERIFICADA e a abertura de subpasta em página oculta. Depois: decidir sobre o campo "Ir" e seguir para a POC-02 (confirmação de setor pela UI e dry-run de consolidação). Não implementar nem habilitar `mover.ts` nessas etapas.
+**Situação:** a POC-02A está entregue (§8.4, ADR-014). O diagnóstico estrutural roda localmente sobre o `tree-inventory.json` exportado, sem navegador nem acesso ao AIR. Ele produz só achados para revisão humana e nenhum plano operacional.
+
+Pendências da leitura (POC-01E), ainda abertas antes de abrir PR para uso operacional: (1) diagnosticar, só por leitura, o achado do `return-failed` (§7.8): `history.length` antes e depois de trocar de página numa subpasta; (2) decidir e implementar a correção da volta do 3º nível após paginação; (3) validar no AIR real a retomada VERIFICADA e a abertura de subpasta em página oculta. Depois: decidir sobre o campo "Ir".
+
+Próxima etapa, POC-02B: confirmação de setor pela UI e dry-run de consolidação, fundamentados só em inventários `planning-eligible`. Antes dela, avaliar um selo de integridade para o `tree-inventory.json`, como o HMAC dos checkpoints: hoje, um arquivo editado de forma coerente seria aceito como elegível. Não implementar nem habilitar `mover.ts` nessas etapas.
 
 ---
 

@@ -4,7 +4,7 @@ import path from 'node:path';
 import { normalizeName } from '../core/duplicates.js';
 import { assertInsideDirectory } from '../safety/scope-validator.js';
 import { diagnosticReport } from '../core/tree-scanner.js';
-import type { AirEnvironment, Identified, Inventory, TreeResult } from '../types/inventory.js';
+import type { AirEnvironment, Identified, Inventory, TreeResult, TreeInventoryExport } from '../types/inventory.js';
 
 export const DEFAULT_OUTPUT_DIR = 'output';
 
@@ -120,12 +120,30 @@ export async function exportTreeResult(
   );
   const written = [await writeAtomic(path.join(dir, 'tree-diagnostic.json'), { ...base, identifiable: false, ...diagnosticReport(result) })];
   if (options.detailed) {
-    written.push(await writeAtomic(path.join(dir, 'tree-inventory.json'), { ...base, identifiable: true, environment: meta.environment, ...result }));
+    written.push(await writeAtomic(path.join(dir, 'tree-inventory.json'), treeInventoryDocument(result, meta)));
   }
   return written;
 }
 
-async function writeAtomic(target: string, data: unknown): Promise<string> {
+/** Documento de `tree-inventory.json` (identificável). Também usado para montar inventários sintéticos nos testes. */
+export function treeInventoryDocument(result: TreeResult, meta: TreeRunMeta): TreeInventoryExport {
+  return {
+    schemaVersion: 2,
+    tool: 'air-organizer',
+    mode: 'recursive',
+    readOnly: true,
+    runId: meta.runId,
+    ...(meta.checkpointRunId ? { checkpointRunId: meta.checkpointRunId } : {}),
+    startedAt: meta.startedAt,
+    finishedAt: meta.finishedAt,
+    identifiable: true,
+    environment: meta.environment,
+    ...result,
+  };
+}
+
+/** Grava JSON com escrita atômica (temporário + rename). */
+export async function writeAtomic(target: string, data: unknown): Promise<string> {
   await mkdir(path.dirname(target), { recursive: true });
   const temp = `${target}.${process.pid}.tmp`;
   await writeFile(temp, JSON.stringify(data, null, 2), { encoding: 'utf-8', flag: 'wx' });
