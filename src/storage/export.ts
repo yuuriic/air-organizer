@@ -4,6 +4,7 @@ import path from 'node:path';
 import { normalizeName } from '../core/duplicates.js';
 import { assertInsideDirectory } from '../safety/scope-validator.js';
 import { diagnosticReport } from '../core/tree-scanner.js';
+import { sealInventory, type InventoryAuthenticator } from '../core/inventory-integrity.js';
 import type { AirEnvironment, Identified, Inventory, TreeResult, TreeInventoryExport } from '../types/inventory.js';
 
 export const DEFAULT_OUTPUT_DIR = 'output';
@@ -95,11 +96,14 @@ export type TreeRunMeta = { runId: string; startedAt: string; finishedAt: string
  * (output/<instância>/<setor>/<runId>/tree-diagnostic.json). O inventário detalhado — nomes,
  * caminhos, URLs e mensagens — só é gravado com `detailed: true`, que exige confirmação explícita
  * do usuário (e observância das políticas da empresa) em quem chama.
+ *
+ * Com `authenticator`, o inventário detalhado é selado (HMAC local, §8.5) no momento da gravação;
+ * sem ele, sai sem selo e só serve para exploração (nunca é elegível para planejamento).
  */
 export async function exportTreeResult(
   result: TreeResult,
   meta: TreeRunMeta,
-  options: { detailed: boolean },
+  options: { detailed: boolean; authenticator?: InventoryAuthenticator; now?: Date },
   outputDir = DEFAULT_OUTPUT_DIR,
 ): Promise<string[]> {
   const base = {
@@ -120,7 +124,9 @@ export async function exportTreeResult(
   );
   const written = [await writeAtomic(path.join(dir, 'tree-diagnostic.json'), { ...base, identifiable: false, ...diagnosticReport(result) })];
   if (options.detailed) {
-    written.push(await writeAtomic(path.join(dir, 'tree-inventory.json'), treeInventoryDocument(result, meta)));
+    const doc = treeInventoryDocument(result, meta);
+    const sealed = options.authenticator ? sealInventory(doc, options.authenticator, options.now ?? new Date()) : doc;
+    written.push(await writeAtomic(path.join(dir, 'tree-inventory.json'), sealed));
   }
   return written;
 }

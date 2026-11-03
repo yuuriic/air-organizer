@@ -3,7 +3,9 @@ import { describe, expect, it } from 'vitest';
 import type { CheckpointFolder } from '../../src/core/checkpoint.js';
 import { analyzeStructure, formatFinding, redactReport, validateInventory, type StructuralReport } from '../../src/core/structural-diagnostics.js';
 import { scanTree } from '../../src/core/tree-scanner.js';
+import { sealInventory } from '../../src/core/inventory-integrity.js';
 import { treeInventoryDocument } from '../../src/storage/export.js';
+import { inventoryAuthenticator } from '../../src/storage/integrity-key.js';
 import type { AirEnvironment, ResumeMode, TreeInventoryExport, TreeLimits } from '../../src/types/inventory.js';
 import { SimNavigator, file, files, folder, type SimBehavior, type SimNode } from '../sim-navigator.js';
 
@@ -24,20 +26,23 @@ const ENV: AirEnvironment = {
   observedAt: FINISHED,
 };
 const pseudonymize = (v: string) => createHmac('sha256', 'k').update(v).digest('hex').slice(0, 32);
+/** Chave local SINTÉTICA. Por padrão os inventários saem selados, como nas opções 6/7. */
+const AUTH = inventoryAuthenticator(Buffer.alloc(32, 7));
 
 async function inventory(
   root: SimNode,
-  opts: { behavior?: SimBehavior; limits?: TreeLimits; resume?: { from: CheckpointFolder[]; mode: ResumeMode } } = {},
+  opts: { behavior?: SimBehavior; limits?: TreeLimits; resume?: { from: CheckpointFolder[]; mode: ResumeMode }; seal?: boolean } = {},
 ): Promise<{ doc: TreeInventoryExport; checkpoint: CheckpointFolder[] }> {
   let checkpoint: CheckpointFolder[] = [];
   const result = await scanTree(new SimNavigator(root, opts.behavior), opts.limits ?? WIDE, {
     checkpoint: { pseudonymize, save: async (s) => void (checkpoint = s.folders), resume: opts.resume },
   });
-  const doc = treeInventoryDocument(result, { runId: 'run-sintetico', startedAt: '2026-11-03T10:00:00.000Z', finishedAt: FINISHED, environment: ENV });
+  const plain = treeInventoryDocument(result, { runId: 'run-sintetico', startedAt: '2026-11-03T10:00:00.000Z', finishedAt: FINISHED, environment: ENV });
+  const doc = opts.seal === false ? plain : sealInventory(plain, AUTH, new Date(FINISHED));
   return { doc: JSON.parse(JSON.stringify(doc)) as TreeInventoryExport, checkpoint }; // como lido do disco
 }
 
-const analyze = (doc: unknown, now = NOW) => analyzeStructure(doc, { now });
+const analyze = (doc: unknown, now = NOW) => analyzeStructure(doc, { now, authenticator: AUTH });
 const rules = (r: StructuralReport) => r.findings.map((f) => f.rule);
 
 describe('A. possíveis duplicidades (pastas irmãs)', () => {
@@ -153,7 +158,7 @@ describe('elegibilidade (reutiliza a verificação da leitura)', () => {
   it('inventário desatualizado e formato anterior à POC-01E: exploratório', async () => {
     const { doc } = await inventory(tree());
     expect(analyze(doc, new Date('2026-11-20T00:00:00.000Z')).eligibility).toEqual({ status: 'exploratory', reasons: ['stale'] });
-    const legacy = { ...doc } as Partial<TreeInventoryExport>;
+    const legacy = { ...(await inventory(tree(), { seal: false })).doc } as Partial<TreeInventoryExport>;
     delete legacy.verification;
     delete legacy.navigation;
     expect(analyze(legacy).eligibility.reasons).toContain('legacy-format');
@@ -221,7 +226,8 @@ describe('privacidade de inventários malformados (referências e datas adultera
   });
 
   it('identificadores da execução com texto sensível não chegam ao relatório sem nomes', async () => {
-    const { doc } = await inventory(folder('raiz', 'Raiz', [folder('a', 'PLANETAS'), folder('b', 'Planetas')]));
+    // Sem selo: alterar identificadores de um inventário selado o recusaria (ver integridade).
+    const { doc } = await inventory(folder('raiz', 'Raiz', [folder('a', 'PLANETAS'), folder('b', 'Planetas')]), { seal: false });
     const r = analyze({ ...doc, runId: SENSITIVE[0], checkpointRunId: SENSITIVE[1] });
     expect(r.eligibility.status).not.toBe('rejected');
     const exposed = JSON.stringify(redactReport(r)) + r.findings.map(formatFinding).join('\n');
@@ -241,7 +247,8 @@ describe('ausência de diagnósticos indevidos e determinismo', () => {
 
   it('mesmo inventário e mesma data: relatório idêntico, independente da ordem das pastas no arquivo', async () => {
     const root = folder('raiz', 'Raiz', [folder('a', 'Alfa', [folder('a1', 'Orbitas')]), folder('b', 'Beta', [folder('b1', 'ÓRBITAS')]), folder('x', 'PLANETAS'), folder('y', 'Planetas')]);
-    const { doc } = await inventory(root);
+    // Sem selo: reordenar o array de pastas mudaria o conteúdo autenticado (ver integridade).
+    const { doc } = await inventory(root, { seal: false });
     const once = JSON.stringify(analyze(doc));
     expect(JSON.stringify(analyze(doc))).toBe(once);
     expect(JSON.stringify(analyze({ ...doc, folders: [...doc.folders].reverse() }))).toBe(once);

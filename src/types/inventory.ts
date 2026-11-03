@@ -279,7 +279,8 @@ export type ResumeMode = 'fast' | 'verified';
 /**
  * Conteúdo de `tree-inventory.json` (opções 6/7, exportado só com confirmação): o TreeResult com
  * os metadados da sessão. IDENTIFICÁVEL. Entrada do diagnóstico estrutural (POC-02A).
- * Exportações anteriores à POC-01E não têm `verification`, `navigation` nem `resume`.
+ * Exportações anteriores à POC-01E não têm `verification`, `navigation` nem `resume`; anteriores à
+ * POC-02B.1 não têm `integrity` (legadas: só exploratórias).
  */
 export type TreeInventoryExport = Omit<TreeResult, 'verification' | 'navigation'> &
   Partial<Pick<TreeResult, 'verification' | 'navigation'>> & {
@@ -293,7 +294,30 @@ export type TreeInventoryExport = Omit<TreeResult, 'verification' | 'navigation'
     startedAt: string;
     finishedAt: string;
     environment: AirEnvironment;
+    integrity?: InventorySeal;
   };
+
+/**
+ * Selo de integridade e procedência local do `tree-inventory.json` (POC-02B.1, ARCHITECTURE.md §8.5).
+ * `mac` = HMAC-SHA256, com subchave derivada por HKDF-SHA256 da chave local, sobre o JSON canônico
+ * do documento inteiro (exceto `integrity`) e deste cabeçalho (exceto `mac`).
+ *
+ * Prova só que o arquivo foi gravado por esta instalação e não mudou desde então. NÃO prova que o
+ * AIR ainda está como na leitura, e NÃO autoriza nenhuma movimentação.
+ */
+export type InventorySeal = {
+  format: 'air-organizer/tree-inventory-seal';
+  version: 1;
+  algorithm: 'HMAC-SHA256';
+  keyDerivation: 'HKDF-SHA256';
+  canonicalization: 'canonical-json-v1';
+  coverage: 'document-except-integrity';
+  /** Identificador público da subchave (derivado; não revela a chave). */
+  keyId: string;
+  sealedAt: string;
+  /** Hex, 64 caracteres. */
+  mac: string;
+};
 
 /**
  * Por que a navegação foi dada como perdida, sem dados identificáveis: código da verificação que

@@ -16,7 +16,9 @@ import { assertReadOnlyMode, fingerprintOf, sanitizeUrl, validateAnalysisScope }
 import { CheckpointStore, DEFAULT_RETENTION_DAYS, defaultCheckpointLocations, type CheckpointEntry, type CheckpointSession } from '../storage/checkpoints.js';
 import { displayPath, exportInventoryResult, exportTreeResult, newRunId } from '../storage/export.js';
 import { describeLocalFailure, exportStructuralReport, listTreeInventories, readInventory } from '../storage/inventory-files.js';
-import { analyzeStructure, formatFinding } from '../core/structural-diagnostics.js';
+import { analyzeStructure, formatFinding, type StructuralReport } from '../core/structural-diagnostics.js';
+import { openVerifyingAuthenticator, type KeyUnavailable } from '../storage/integrity-key.js';
+import { UNSIGNED_INVENTORY_MESSAGE } from '../core/inventory-integrity.js';
 import type { AirEnvironment, Identified, Inventory, ResumeMode, TreeLimits, TreeResult } from '../types/inventory.js';
 
 const READ_ONLY = true;
@@ -394,7 +396,11 @@ async function runTree(page: Page, limits: TreeLimits, session: CheckpointSessio
   console.log('\nO inventário detalhado contém nomes, caminhos e URLs (dados possivelmente pessoais/sensíveis).');
   if (result.resume) console.log('Pastas reaproveitadas do checkpoint aparecem nele só com contagens (o checkpoint não guarda nomes).');
   const detailed = await confirm('Exportar também o inventário detalhado? Somente se permitido pelas políticas da empresa.');
-  for (const file of await exportTreeResult(result, meta, { detailed })) console.log(`  Gravado: ${displayPath(file)}`);
+  // Selo local (§8.5) com a mesma chave que o CheckpointStore carregou para esta execução:
+  // a exportação não relê nem recria a chave do disco (se ela sumiu no meio, nada é criado).
+  const authenticator = detailed ? (await checkpointStore()).inventoryAuthenticator : undefined;
+  for (const file of await exportTreeResult(result, meta, { detailed, authenticator })) console.log(`  Gravado: ${displayPath(file)}`);
+  if (authenticator) console.log('  Inventário detalhado selado com a chave local (HMAC-SHA256). O selo prova só que o arquivo não mudou; não autoriza movimentação.');
 }
 
 /**
@@ -495,15 +501,31 @@ Modo de retomada:
   await runTree(page, limits, session, { from: checkpoint.folders, mode });
 }
 
-/* ───────────── Diagnóstico estrutural (POC-02A) ───────────── */
+/* ───────────── Diagnóstico estrutural (POC-02A) e integridade (POC-02B.1) ───────────── */
 
 const INVENTORY_MAX_AGE_DAYS = Number(process.env.AIR_ORGANIZER_INVENTORY_MAX_AGE_DAYS ?? 7);
 
 const ELIGIBILITY_LABEL = {
-  'planning-eligible': 'ELEGÍVEL para planejamento: leitura completa, revalidada, sem divergência e recente. Os achados continuam exigindo revisão humana.',
+  'planning-eligible': 'ELEGÍVEL para planejamento: selo autenticado, leitura completa, revalidada, sem divergência e recente. Não autoriza movimentação; os achados continuam exigindo revisão humana.',
   exploratory: 'EXPLORATÓRIO: os achados servem para exploração e NÃO podem fundamentar planos operacionais.',
-  rejected: 'RECUSADO: inventário inconsistente ou ilegível; nenhum achado foi produzido.',
+  rejected: 'RECUSADO: inventário inconsistente, adulterado ou ilegível; nenhum achado foi produzido.',
 } as const;
+
+const KEY_UNAVAILABLE_LABEL: Record<KeyUnavailable, string> = {
+  missing: 'chave local ausente',
+  invalid: 'chave local inválida ou em local não permitido',
+  unreadable: 'chave local ilegível',
+};
+
+function integrityLabel(report: StructuralReport, key: KeyUnavailable | undefined): string {
+  const i = report.integrity;
+  if (i.status === 'authenticated') return 'AUTENTICADA: gravado por esta instalação e inalterado desde então (não quer dizer que o AIR ainda esteja igual).';
+  if (i.status === 'unsigned') return `${UNSIGNED_INVENTORY_MESSAGE} Utilizável só para exploração.`;
+  if (i.status === 'unverifiable') return `NÃO VERIFICÁVEL (${key ? KEY_UNAVAILABLE_LABEL[key] : 'chave local indisponível'}): utilizável só para exploração.`;
+  return 'INVÁLIDA: selo não confere; o inventário é recusado.';
+}
+
+const COMPLETENESS_LABEL = { complete: 'COMPLETA', partial: 'PARCIAL', failed: 'INTERROMPIDA' } as const;
 
 /**
  * Analisa um inventário recursivo já exportado (tree-inventory.json). Sem navegador e sem acesso
@@ -520,8 +542,20 @@ async function structuralDiagnostics(): Promise<void> {
   const entry = inventories[Number(await ask('Número do inventário: ')) - 1];
   if (!entry) return;
 
-  const report = analyzeStructure(await readInventory(entry.file), { now: new Date(), maxAgeDays: INVENTORY_MAX_AGE_DAYS });
-  console.log(`\nElegibilidade: ${ELIGIBILITY_LABEL[report.eligibility.status]}`);
+  // Verificação nunca cria a chave local: sem ela, os selos ficam não verificáveis.
+  const key = await openVerifyingAuthenticator(CHECKPOINT_LOCATIONS.keyFile);
+  const report = analyzeStructure(await readInventory(entry.file), {
+    now: new Date(),
+    maxAgeDays: INVENTORY_MAX_AGE_DAYS,
+    ...('authenticator' in key ? { authenticator: key.authenticator } : {}),
+  });
+  console.log(`\nIntegridade:   ${integrityLabel(report, 'unavailable' in key ? key.unavailable : undefined)}`);
+  if (report.completeness) {
+    const k = report.completeness;
+    const revalidated = k.contentRevalidated === undefined ? 'revalidação não informada (formato antigo)' : k.contentRevalidated ? 'conteúdo lido na sessão' : 'conteúdo NÃO revalidado';
+    console.log(`Completude:    ${COMPLETENESS_LABEL[k.status]} · ${revalidated}${k.resumeMode ? ` · retomada ${MODE_LABEL[k.resumeMode]}` : ''}`);
+  }
+  console.log(`Elegibilidade: ${ELIGIBILITY_LABEL[report.eligibility.status]}`);
   if (report.eligibility.reasons.length) console.log(`  Motivos: ${report.eligibility.reasons.join('; ')}`);
   if (report.eligibility.status === 'rejected') return;
   const c = report.coverage;
@@ -552,7 +586,7 @@ async function structuralDiagnostics(): Promise<void> {
 
 function menu(resumable: number): string {
   return `
-AIR Organizer — POC-02A (somente leitura)
+AIR Organizer — POC-02B.1 (somente leitura)
 
 1. Verificar conexão com AIR
 2. Analisar pasta atual

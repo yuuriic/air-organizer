@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { normalizeName, requiredRules } from './duplicates.js';
-import type { FolderNode, FolderStatus, NormalizationRule, TreeInventoryExport } from '../types/inventory.js';
+import { INTEGRITY_MESSAGES, verifyInventoryIntegrity, type IntegrityAssessment, type InventoryAuthenticator } from './inventory-integrity.js';
+import type { FolderNode, FolderStatus, NormalizationRule, ResumeMode, TreeInventoryExport } from '../types/inventory.js';
 
 /**
  * Diagnóstico estrutural (POC-02A). Motor DETERMINÍSTICO e puro — sem navegador, sem sistema de
@@ -12,6 +13,10 @@ import type { FolderNode, FolderStatus, NormalizationRule, TreeInventoryExport }
  * Elegibilidade (§8.4): o motor não recalcula a completude — reutiliza `verification`,
  * `navigation`, `resume` e `status` da leitura. Achados de inventário não elegível são só
  * exploratórios; inventário internamente inconsistente é recusado sem achados.
+ *
+ * Integridade (§8.5, POC-02B.1): só inventário com selo autenticado pela chave local pode ser
+ * elegível. Sem selo (legado ou selo removido) ou sem chave = exploratório; selo inválido = recusado. Autenticado
+ * não quer dizer atual: completude, retomada e idade continuam valendo.
  */
 
 export const ENGINE_VERSION = '1';
@@ -72,6 +77,10 @@ export type StructuralFinding = {
 };
 
 export type EligibilityReason =
+  /** Sem selo de integridade (exportação anterior à POC-02B.1). */
+  | 'integrity-unsigned'
+  /** Selo presente, mas sem chave local para conferi-lo. */
+  | 'integrity-unverifiable'
   | 'legacy-format'
   | 'status-partial'
   | 'status-failed'
@@ -83,7 +92,7 @@ export type EligibilityReason =
   | 'stale';
 
 export type InventoryEligibility =
-  /** Leitura completa, revalidada, sem divergência, recente: pode fundamentar planejamento (POC-02B). */
+  /** Selo autenticado; leitura completa, revalidada, sem divergência, recente: pode fundamentar planejamento (POC-02B). */
   | { status: 'planning-eligible'; reasons: [] }
   /** Inventário consistente, mas não elegível: achados só para exploração. */
   | { status: 'exploratory'; reasons: EligibilityReason[] }
@@ -92,11 +101,17 @@ export type InventoryEligibility =
 
 export type StructuralReport = {
   kind: 'air-organizer/structural-diagnostics';
-  schemaVersion: 1;
+  /** 2: `integrity` e `completeness` (POC-02B.1). */
+  schemaVersion: 2;
   engineVersion: string;
   identifiable: boolean;
   evaluatedAt: string;
   source: { runId?: string; checkpointRunId?: string; finishedAt?: string; status?: string; resumeMode?: string };
+  /** O arquivo foi gravado por esta instalação e não mudou? (sem chave nem código no relatório) */
+  integrity: IntegrityAssessment;
+  /** O que a leitura cobriu, como ela mesma declarou. Ausente em inventário recusado. */
+  completeness?: { status: 'complete' | 'partial' | 'failed'; contentRevalidated?: boolean; resumeMode?: ResumeMode };
+  /** Pode fundamentar planejamento? Combina integridade, completude, retomada e idade. */
   eligibility: InventoryEligibility;
   coverage: {
     folders: number;
@@ -115,6 +130,8 @@ export type AnalyzeOptions = {
   now: Date;
   /** Inventário mais antigo que isto é desatualizado para planejamento. Padrão: 7 dias. */
   maxAgeDays?: number;
+  /** Subchave local dos selos. Ausente = selos não verificáveis: nada é elegível (falha segura). */
+  authenticator?: InventoryAuthenticator;
 };
 
 /* Limiares conservadores de HIER-EQUIVALENT-CHILDREN (preferir falso negativo a falso positivo). */
@@ -283,9 +300,14 @@ export function validateInventory(inv: unknown): string[] {
   return [...new Set(problems)];
 }
 
-/** Elegibilidade a partir do que a leitura já declarou (não é recalculada). */
-export function eligibilityOf(inv: TreeInventoryExport, options: AnalyzeOptions): InventoryEligibility {
+/**
+ * Elegibilidade a partir da integridade e do que a leitura já declarou (não é recalculada).
+ * Ordem (§8.5): integridade, completude e retomada, idade. Selo inválido nem chega aqui (recusado).
+ */
+export function eligibilityOf(inv: TreeInventoryExport, options: AnalyzeOptions, integrity: IntegrityAssessment): InventoryEligibility {
   const reasons: EligibilityReason[] = [];
+  if (integrity.status === 'unsigned') reasons.push('integrity-unsigned');
+  if (integrity.status !== 'authenticated' && integrity.status !== 'unsigned') reasons.push('integrity-unverifiable');
   if (!inv.verification || !inv.navigation) reasons.push('legacy-format');
   if (inv.status === 'partial') reasons.push('status-partial');
   if (inv.status === 'failed') reasons.push('status-failed');
@@ -320,7 +342,10 @@ function childPairs(parent: FolderNode, kids: FolderNode[]): Array<{ name: strin
 export function analyzeStructure(input: unknown, options: AnalyzeOptions): StructuralReport {
   if (!(options.now instanceof Date) || !Number.isFinite(options.now.getTime())) throw new TypeError('A data de avaliação precisa ser válida.');
   const evaluatedAt = options.now.toISOString();
+  // 1. estrutura; 2. integridade e procedência. Qualquer falha = recusado, sem achados.
   const problems = validateInventory(input);
+  const integrity = verifyInventoryIntegrity(input, options.authenticator);
+  if (integrity.status === 'invalid') problems.push(`integridade: ${INTEGRITY_MESSAGES[integrity.reason]}`);
   const inv = input as TreeInventoryExport;
   const source = problems.length
     ? {}
@@ -332,7 +357,7 @@ export function analyzeStructure(input: unknown, options: AnalyzeOptions): Struc
         ...(inv.resume ? { resumeMode: inv.resume.mode } : {}),
       };
   const empty = { findings: 0, byCategory: { 'possible-duplicate': 0, 'inconsistent-naming': 0, 'divergent-hierarchy': 0 }, byRule: {} };
-  const base = { kind: 'air-organizer/structural-diagnostics' as const, schemaVersion: 1 as const, engineVersion: ENGINE_VERSION,   identifiable: problems.length === 0, evaluatedAt, source };
+  const base = { kind: 'air-organizer/structural-diagnostics' as const, schemaVersion: 2 as const, engineVersion: ENGINE_VERSION, identifiable: problems.length === 0, evaluatedAt, source, integrity };
   if (problems.length) {
     return { ...base, eligibility: { status: 'rejected', reasons: problems }, coverage: { folders: 0, foldersWithName: 0, foldersRead: 0, foldersComplete: 0 }, summary: empty, findings: [] };
   }
@@ -505,7 +530,12 @@ export function analyzeStructure(input: unknown, options: AnalyzeOptions): Struc
   }
   return {
     ...base,
-    eligibility: eligibilityOf(inv, options),
+    completeness: {
+      status: inv.status,
+      ...(inv.verification ? { contentRevalidated: inv.verification.contentRevalidated } : {}),
+      ...(inv.resume ? { resumeMode: inv.resume.mode } : {}),
+    },
+    eligibility: eligibilityOf(inv, options, integrity),
     coverage: {
       folders: folders.length,
       foldersWithName: folders.filter((f) => f.name !== undefined).length,
