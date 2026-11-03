@@ -129,13 +129,15 @@ air-organizer/
 │   │   ├── checkpoint.ts      # modelo puro do checkpoint: pseudônimos, integridade, validação
 │   │   ├── records.ts         # parsing das linhas e classificação de tipo
 │   │   ├── structural-diagnostics.ts # diagnóstico estrutural determinístico (POC-02A)
+│   │   ├── inventory-integrity.ts # selo HMAC do tree-inventory.json: selar e verificar (POC-02B.1)
 │   │   └── duplicates.ts      # normalização e suspeitas de duplicidade
 │   ├── safety/
 │   │   └── scope-validator.ts # ações permitidas, escopo, URLs, caminhos de saída
 │   ├── storage/
 │   │   ├── export.ts          # relatórios diagnósticos e inventários JSON (escrita atômica)
 │   │   ├── checkpoints.ts     # checkpoints locais: chave HMAC, escrita atômica, trava, retenção
-│   │   └── inventory-files.ts # inventários exportados e relatórios estruturais em output/
+│   │   ├── inventory-files.ts # inventários exportados e relatórios estruturais em output/
+│   │   └── integrity-key.ts   # subchave HKDF dos selos, derivada da chave local (POC-02B.1)
 │   ├── cli/
 │   │   ├── index.ts           # menu interativo
 │   │   └── args.ts            # --url / AIR_ORGANIZER_URL
@@ -427,9 +429,9 @@ A consolidação deve comparar descendentes antes de mover uma pasta inteira. Se
 
 | Estado | Quando |
 |---|---|
-| `planning-eligible` | `verification.eligibleForPlanning` verdadeiro (completa, revalidada, sem `content-changed`) e inventário com até 7 dias (`AIR_ORGANIZER_INVENTORY_MAX_AGE_DAYS`) |
-| `exploratory` | consistente, mas com qualquer motivo: `status-partial`, `status-failed`, `aborted`, `fast-resume`, `reused-folders`, `content-changed`, `not-eligible-for-planning`, `stale`, `legacy-format` (exportação anterior à POC-01E) |
-| `rejected` | inconsistente, ilegível ou sem nomes (`tree-diagnostic.json`) |
+| `planning-eligible` | selo de integridade autenticado (§8.5), `verification.eligibleForPlanning` verdadeiro (completa, revalidada, sem `content-changed`) e inventário com até 7 dias (`AIR_ORGANIZER_INVENTORY_MAX_AGE_DAYS`) |
+| `exploratory` | consistente, mas com qualquer motivo: `integrity-unsigned` (sem selo), `integrity-unverifiable` (sem chave local), `status-partial`, `status-failed`, `aborted`, `fast-resume`, `reused-folders`, `content-changed`, `not-eligible-for-planning`, `stale`, `legacy-format` (exportação anterior à POC-01E) |
+| `rejected` | inconsistente, ilegível, sem nomes (`tree-diagnostic.json`) ou com selo inválido (§8.5) |
 
 Só `planning-eligible` poderá fundamentar planos operacionais (POC-02B). Achados exploratórios servem só para exploração.
 
@@ -447,6 +449,40 @@ Só `planning-eligible` poderá fundamentar planos operacionais (POC-02B). Achad
 "Certeza" é da **detecção**, sem probabilidades: textos idênticos, equivalentes pelas regras listadas ou padrão estrutural dentro dos limiares. Decisões conservadoras: duplicidade só entre irmãs (o mesmo nome em pais diferentes pode ser legítimo, como anos); grafias diferentes dentro de um único pai já são o achado de irmãs; hierarquia só com listagens completas; estruturas com pouco em comum não geram achado; nomes de arquivos não são comparados.
 
 **Privacidade.** O relatório completo é identificável e fica em `output/` (`structural-diagnostics-detailed.json`, só com confirmação). O padrão (console e `structural-diagnostics.json`) é redigido: referências da execução (F1…), regras, certeza, contagens e limitações, sem nomes, caminhos nem grafias. CLI: opção 8, sem navegador.
+
+### 8.5 Integridade e procedência dos inventários (POC-02B.1, implementado)
+
+Problema (R3 da auditoria da POC-02A): um `tree-inventory.json` editado de forma **estruturalmente coerente** (por exemplo, `finishedAt` "rejuvenescido" ou `eligibleForPlanning` forjado junto com os status) passava pela validação e podia parecer elegível.
+
+**Selo.** Ao gravar o inventário detalhado (opções 6/7), a CLI acrescenta o campo `integrity`, sem mudar `schemaVersion` (2) nem os demais campos:
+
+| Campo | Valor |
+|---|---|
+| `format` / `version` | `air-organizer/tree-inventory-seal` / `1` |
+| `algorithm` / `keyDerivation` | `HMAC-SHA256` / `HKDF-SHA256` |
+| `canonicalization` / `coverage` | `canonical-json-v1` / `document-except-integrity` |
+| `keyId` | identificador público da subchave (16 hex, derivado; não revela a chave) |
+| `sealedAt` | quando o selo foi gravado (não antes de `finishedAt`) |
+| `mac` | HMAC-SHA256 (64 hex) |
+
+- **Chave.** Reaproveita a chave-mestra local dos checkpoints (`checkpoint.key`, perfil do usuário, fora do repositório, ADR-010). Os inventários usam só uma **subchave derivada por HKDF-SHA256** (`info = tree-inventory-seal/v1`), e os checkpoints continuam usando a chave-mestra. Os propósitos ficam separados criptograficamente, com um único segredo a proteger. Nenhuma chave, subchave ou código aparece em console, log ou relatório.
+- **Mensagem autenticada.** Domínio `air-organizer/tree-inventory-seal/v1`, seguido do JSON canônico (`canonicalJson`, chaves ordenadas) de `{ seal: cabeçalho sem mac, document: documento sem integrity }`, calculado sobre o documento **como gravado** (após o round-trip JSON). O selo cobre tudo: nomes, caminhos, URLs, referências, contagens, status, `verification`, `navigation`, `resume`, `abort`, limites, datas e ambiente. Reordenar propriedades ou reformatar o arquivo não invalida o selo; mudar qualquer valor ou a ordem de um array, sim.
+- **Gravação (opções 6/7).** O autenticador vem do `CheckpointStore` da execução (`inventoryAuthenticator`), derivado da mesma chave que ele carregou ao abrir e usa nos checkpoints. A exportação não relê nem recria a chave: se `checkpoint.key` for apagada ou trocada durante a leitura, o inventário continua selado com a chave da execução e nenhuma chave nova é criada em silêncio. A chave em si não sai do store.
+- **Snapshot.** `sealInventory` calcula o HMAC sobre o documento já serializado e lido de volta (round-trip JSON) e devolve esse mesmo objeto com o selo, sem referências ao `TreeResult`: o conteúdo autenticado é exatamente o gravado, mesmo que o original mude depois.
+- **Verificação (opção 8).** A opção 8 nunca cria a chave. A comparação de `keyId` e `mac` usa tempo constante (`timingSafeEqual`).
+
+**Ordem da avaliação:** (1) estrutura; (2) integridade; (3) completude e retomada VERIFICADA; (4) idade; (5) coerência entre metadados e conteúdo, já parte de (1).
+
+| Integridade | Quando | Efeito |
+|---|---|---|
+| `authenticated` | selo válido com a chave local | pode ser elegível, se (3) e (4) também permitirem |
+| `unsigned` | sem `integrity`: exportação anterior à POC-02B.1 **ou selo removido** (indistinguíveis); conteúdo não autenticado. A opção 8 exibe "SEM SELO: inventário legado ou selo removido; conteúdo não autenticado." | só exploratório (`integrity-unsigned`); nunca promovido. Remover o selo de um arquivo adulterado o rebaixa de recusado para exploratório, nunca para elegível |
+| `unverifiable` | selo presente, chave local ausente, ilegível ou malformada | só exploratório (`integrity-unverifiable`) |
+| `invalid` | selo malformado, de outra versão/algoritmo, com campo extra, anterior a `finishedAt`, de outra chave ou com código divergente | **recusado**, sem achados |
+
+**Limites do que o selo prova.** Ele prova só que o arquivo foi gravado por esta instalação (com esta chave) e não mudou desde então. **Não prova que o AIR ainda esteja igual**: idade, completude e retomada continuam valendo, e um inventário autenticado pode ser exploratório. O selo **não concede autorização** de planejamento operacional nem de movimentação.
+
+**Compatibilidade.** Inventários antigos continuam legíveis e só exploratórios. Não há selagem retroativa: um arquivo lido do disco nunca é selado (a procedência dele não pode ser atestada sem uma nova leitura autorizada); para obter um inventário elegível, faça uma nova leitura (opção 6 ou retomada VERIFICADA). Recriar a chave local invalida os selos anteriores (recusados por `key-mismatch`). Se a chave for apagada durante uma execução, a próxima abertura do store cria outra; os inventários e checkpoints dessa execução passam a ser recusados (`key-mismatch`/digest), nunca aceitos com outra chave. Checkpoints, navegação e `tree-diagnostic.json` não mudam. O relatório estrutural passa a `schemaVersion: 2`, com `integrity` e `completeness`.
 
 ## 9. Planejador e dry-run
 
@@ -518,7 +554,7 @@ Nomes de pastas e arquivos podem conter dados pessoais e sensíveis. Por isso h�
 | Console padrão | status, contagens, referências (F1, D1…), tipos de pendência; caminhos de saída como `output/*/*/<runId>/<arquivo>` | sempre |
 | `inventory-diagnostic.json` (opção 5), `tree-diagnostic.json` (opções 6 e 7) | o mesmo, com `identifiable: false`; sem nomes, caminhos, URLs, cliente, setor nem mensagens | sempre que se exporta |
 | `checkpoint.json` (opções 6 e 7) | pseudônimos HMAC, contagens, status, motivos, limites e datas (§7.7); fora do repositório, com retenção | a cada passo da leitura recursiva |
-| `inventory.json` (opção 5), `tree-inventory.json` (opção 6) | inventário identificável, com `identifiable: true` na leitura recursiva | **somente após confirmação explícita** do operador, a cada exportação |
+| `inventory.json` (opção 5), `tree-inventory.json` (opção 6) | inventário identificável, com `identifiable: true` na leitura recursiva; o `tree-inventory.json` leva o selo HMAC `integrity` (§8.5), sem chave | **somente após confirmação explícita** do operador, a cada exportação |
 
 - Valores do ambiente (domínio, URL, pasta, breadcrumb, cliente, setor) aparecem no console só como "identificado/não identificado" e fonte.
 - Mensagens de erro e de pendência podem citar nomes. No console aparecem só pelo tipo. A exceção é a opção 3, cuja finalidade é escolher uma subpasta pelo nome. `AIR_ORGANIZER_VERBOSE_ERRORS=1` é um opt-in local de depuração.
@@ -642,14 +678,15 @@ Critérios de aceite:
 - **ADR-012 — Reposicionamento só com controles validados (POC-01E):** número visível (e "próxima" como alternativa), passo a passo, com página ativa e listagem confirmadas; reticências nunca clicadas. O campo "Ir" existe no AIR real, mas fica fora até haver aprovação específica para digitação em campo (§7.8).
 - **ADR-013 — Identidade de navegação x consistência de conteúdo (POC-01E):** na volta ao pai, identidade divergente interrompe (`identity-mismatch`); identidade confirmada com total ou listagem divergentes é aceita como `content-changed`, que invalida a completude da pasta e dos ancestrais, impede cliques a partir da listagem antiga, não gera releitura em loop, impede reaproveitamento na retomada e impede a elegibilidade para planejamento. Diagnósticos separados e sem dados identificáveis. O inventário não é uma fotografia transacional (§7.8).
 - **ADR-014 — Diagnóstico estrutural determinístico e desacoplado (POC-02A):** motor puro sobre o inventário exportado, sem navegador, rede ou banco de dados; valida a consistência antes das regras (inconsistência = recusado, sem achados); herda a elegibilidade da leitura (só `planning-eligible` fundamenta planos); regras conservadoras e nomeadas, certeza sem probabilidades, revisão humana obrigatória, sem sugestões de renomear/mover/mesclar; saída padrão redigida (§8.4).
+- **ADR-015 — Selo de integridade dos inventários (POC-02B.1):** o `tree-inventory.json` é selado na gravação com HMAC-SHA256, usando uma subchave HKDF-SHA256 derivada da chave local dos checkpoints (propósitos separados, um único segredo), sobre o JSON canônico do documento inteiro e do cabeçalho. A subchave vem da chave que o `CheckpointStore` carregou para a execução (sem reler nem recriar a chave na exportação), e o selo é calculado sobre um snapshot independente, o mesmo que é gravado. Só inventário `authenticated` pode ser `planning-eligible`; sem selo (legado ou selo removido, indistinguíveis) ou sem chave = exploratório; selo inválido = recusado. Sem selagem retroativa e sem serviços externos. Integridade autenticada não significa conteúdo atual e não autoriza movimentação (§8.5).
 
 ## 18. Próxima ação concreta
 
-**Situação:** a POC-02A está entregue (§8.4, ADR-014). O diagnóstico estrutural roda localmente sobre o `tree-inventory.json` exportado, sem navegador nem acesso ao AIR. Ele produz só achados para revisão humana e nenhum plano operacional.
+**Situação:** a POC-02A está entregue (§8.4, ADR-014). O diagnóstico estrutural roda localmente sobre o `tree-inventory.json` exportado, sem navegador nem acesso ao AIR. Ele produz só achados para revisão humana e nenhum plano operacional. A POC-02B.1 está entregue (§8.5, ADR-015): os inventários são selados com HMAC local, e só inventários autenticados podem ser elegíveis.
 
 Pendências da leitura (POC-01E), ainda abertas antes de abrir PR para uso operacional: (1) diagnosticar, só por leitura, o achado do `return-failed` (§7.8): `history.length` antes e depois de trocar de página numa subpasta; (2) decidir e implementar a correção da volta do 3º nível após paginação; (3) validar no AIR real a retomada VERIFICADA e a abertura de subpasta em página oculta. Depois: decidir sobre o campo "Ir".
 
-Próxima etapa, POC-02B: confirmação de setor pela UI e dry-run de consolidação, fundamentados só em inventários `planning-eligible`. Antes dela, avaliar um selo de integridade para o `tree-inventory.json`, como o HMAC dos checkpoints: hoje, um arquivo editado de forma coerente seria aceito como elegível. Não implementar nem habilitar `mover.ts` nessas etapas.
+Próxima etapa, restante da POC-02B: confirmação de setor pela UI e dry-run de consolidação, fundamentados só em inventários `planning-eligible` (autenticados). Não implementar nem habilitar `mover.ts` nessas etapas.
 
 ---
 

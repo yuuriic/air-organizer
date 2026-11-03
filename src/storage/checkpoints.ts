@@ -15,8 +15,10 @@ import {
   type TreeCheckpoint,
 } from '../core/checkpoint.js';
 import type { TreeCheckpointSnapshot } from '../core/tree-scanner.js';
-import { SafetyViolation, assertInsideDirectory } from '../safety/scope-validator.js';
+import type { InventoryAuthenticator } from '../core/inventory-integrity.js';
+import { SafetyViolation, assertInsideDirectory, assertOutsideRepository } from '../safety/scope-validator.js';
 import type { AirEnvironment, ResumeMode, TreeLimits } from '../types/inventory.js';
+import { inventoryAuthenticator } from './integrity-key.js';
 
 /**
  * Checkpoints da leitura recursiva em arquivos JSON locais (sem banco de dados).
@@ -103,11 +105,17 @@ async function loadKey(keyFile: string): Promise<Buffer> {
 
 export class CheckpointStore {
   readonly pseudonymize: Pseudonymize;
+  /**
+   * Selo dos inventários desta execução (§8.5): subchave HKDF da MESMA chave carregada em `open`.
+   * A exportação nunca relê nem recria a chave do disco; a chave em si não é exposta.
+   */
+  readonly inventoryAuthenticator: InventoryAuthenticator;
   private readonly retentionMs: number;
   private readonly now: () => Date;
 
   private constructor(readonly dir: string, key: Buffer, options: StoreOptions) {
     this.pseudonymize = (value) => createHmac('sha256', key).update(value, 'utf8').digest('hex').slice(0, 32);
+    this.inventoryAuthenticator = inventoryAuthenticator(key);
     this.retentionMs = options.retentionDays * 24 * 60 * 60 * 1000;
     this.now = options.now ?? (() => new Date());
   }
@@ -115,12 +123,7 @@ export class CheckpointStore {
   static async open(options: StoreOptions): Promise<CheckpointStore> {
     if (!Number.isFinite(options.retentionDays) || options.retentionDays <= 0) throw new Error('Retenção de checkpoints inválida (dias > 0).');
     const dir = path.resolve(options.dir);
-    const repo = path.resolve(options.repositoryDir ?? process.cwd());
-    for (const p of [dir, path.resolve(options.keyFile)]) {
-      if (p === repo || p.startsWith(repo + path.sep)) {
-        throw new SafetyViolation('Checkpoints e a chave local não podem ficar dentro do repositório. Configure AIR_ORGANIZER_CHECKPOINT_DIR fora dele.');
-      }
-    }
+    assertOutsideRepository([dir, options.keyFile], options.repositoryDir);
     return new CheckpointStore(dir, await loadKey(options.keyFile), options);
   }
 

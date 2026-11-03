@@ -144,6 +144,16 @@ export function assertInsideDirectory(baseDir: string, target: string): string {
   return resolved;
 }
 
+/** Checkpoints e a chave local nunca ficam dentro do repositório (padrão: diretório atual). */
+export function assertOutsideRepository(paths: readonly string[], repositoryDir = process.cwd()): void {
+  const repo = path.resolve(repositoryDir);
+  for (const p of paths.map((x) => path.resolve(x))) {
+    if (p === repo || p.startsWith(repo + path.sep)) {
+      throw new SafetyViolation('Checkpoints e a chave local não podem ficar dentro do repositório. Configure AIR_ORGANIZER_CHECKPOINT_DIR fora dele.');
+    }
+  }
+}
+
 /** Motivo, sem nomes, de uma abertura de subpasta recusada ANTES do clique. */
 export type OpenRefusalCode = 'not-folder' | 'row-changed' | 'homonym' | 'interactive-cell' | 'precondition';
 
