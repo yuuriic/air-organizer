@@ -1,0 +1,52 @@
+# CI mínima: typecheck e testes (unitários + integração em fixture HTML sintética).
+# Não usa secrets, não acessa o AIR real, não usa sessão autenticada nem publica artefatos.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Somente leitura do repositório.
+permissions:
+  contents: read
+
+# Um PR novo cancela a execução anterior do mesmo PR; pushes na main nunca são cancelados.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Typecheck e testes
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Node.js 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Instalar dependências
+        run: npm ci
+
+      # Os testes de integração usam o Google Chrome já instalado no runner (channel 'chrome'),
+      # headless e com contexto efêmero; as páginas são fixtures servidas por page.route
+      # numa origem .test — nenhuma requisição sai do runner.
+      - name: Conferir Google Chrome
+        run: google-chrome --version
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Testes
+        run: npm test
