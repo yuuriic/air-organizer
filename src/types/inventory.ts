@@ -1,0 +1,229 @@
+/**
+ * Contratos da POC-01. Nenhum tipo aqui carrega conteúdo de documento,
+ * credencial, cookie ou token — apenas metadados visíveis na listagem do AIR.
+ */
+
+/** Valor que pode não ter sido identificado com segurança. Nunca inventar. */
+export type Identified<T> =
+  | { status: 'identified'; value: T; source: IdentificationSource }
+  | { status: 'not-identified'; reason: string };
+
+export type IdentificationSource = 'url' | 'breadcrumb' | 'page-heading' | 'operator';
+
+export type AirEnvironment = {
+  /** Origem HTTPS sem path, query ou fragmento (ex.: https://air.exemplo.test). */
+  instanceOrigin: Identified<string>;
+  /** URL sem query string nem fragmento, para não registrar tokens. */
+  pageUrl: Identified<string>;
+  client: Identified<string>;
+  sector: Identified<string>;
+  currentFolder: Identified<string>;
+  /** Segmentos do breadcrumb, na ordem exibida. */
+  breadcrumb: Identified<string[]>;
+  observedAt: string;
+};
+
+/** 'unknown' quando a UI não permite distinguir pasta de arquivo com segurança. */
+export type ItemKind = 'folder' | 'file' | 'unknown';
+
+export type IdentityConfidence = 'stable-id' | 'path-and-metadata' | 'ambiguous';
+
+/** Linha bruta extraída do DOM: cabeçalho → texto da célula. */
+export type RawRow = {
+  cells: Record<string, string>;
+  /** Pistas visuais de tipo (ícone, aria-label, classe) sem interpretação. */
+  kindHints: string[];
+  /** Atributos candidatos a ID (data-id, data-row-id...), sem interpretação. */
+  idCandidates: Record<string, string>;
+  /** Ícone da coluna de tipo: "folder" (svg lucide) ou "img:pdf icon" (<img alt>); "" = nenhum/ambíguo. Ausente sem a coluna. */
+  typeIcon?: string;
+};
+
+export type AirItem = {
+  /** Somente se um ID estável for comprovadamente observado na UI. */
+  id?: string;
+  kind: ItemKind;
+  /** De onde veio o tipo (ex.: "icon:folder"); ausente quando kind = 'unknown'. */
+  kindEvidence?: string;
+  name: string;
+  description?: string;
+  /** Caminho conforme exibido pela coluna "Caminho", quando existir. */
+  path?: string;
+  createdAt?: string;
+  status?: string;
+  sourcePage: number;
+  rowIndex: number;
+  observedAt: string;
+  identityConfidence: IdentityConfidence;
+  /** Assinatura contextual usada para deduplicar observações (não é ID do AIR). */
+  observationKey: string;
+};
+
+export type PageSnapshot = {
+  rows: RawRow[];
+  /** Indicador textual da página, se exibido (ex.: "Página 2 de 5"). */
+  pageIndicator?: string;
+  /** Total de itens da pasta exibido no título ("Nome (N)"), se exibido. */
+  reportedTotal?: number;
+  /** N de "X de N linhas(s) selecionadas": linhas da página atual, NÃO da pasta. */
+  pageRowCounter?: number;
+  /** Rótulo do filtro de tipo acima da tabela (só "Todos" mostra a pasta inteira). */
+  typeFilter?: string;
+  /** Busca acima da tabela preenchida: a listagem está filtrada. */
+  searchActive?: boolean;
+};
+
+export type PageReadResult = {
+  pageNumber: number;
+  signature: string;
+  rowCount: number;
+  pageIndicator?: string;
+};
+
+export type ScanIssueKind =
+  | 'page-unchanged'
+  | 'loop-detected'
+  | 'timeout'
+  | 'read-error'
+  | 'navigation-error'
+  | 'max-pages-reached'
+  | 'max-items-reached'
+  | 'scope-changed'
+  | 'parse-warning'
+  | 'count-mismatch'
+  | 'filter-active';
+
+export type ScanIssue = {
+  kind: ScanIssueKind;
+  pageNumber?: number;
+  message: string;
+};
+
+export type CoverageReport = {
+  pagesRead: number;
+  /** Estimado a partir de total/tamanho de página, se possível. */
+  expectedPages?: number;
+  itemsObserved: number;
+  uniqueItems: number;
+  repeatedObservations: number;
+  reportedTotal?: number;
+  /** Páginas que se sabe existirem e não foram lidas (quando estimável). */
+  unreadPages: number[];
+  complete: boolean;
+  stopReason: 'last-page' | 'error' | 'loop' | 'timeout' | 'max-pages' | 'max-items' | 'scope-changed';
+  issues: ScanIssue[];
+};
+
+export type ScanResult = {
+  items: AirItem[];
+  pages: PageReadResult[];
+  coverage: CoverageReport;
+};
+
+export type DuplicateConfidence = 'high' | 'medium';
+
+export type DuplicateSuspicion = {
+  suspicionId: string;
+  normalizedName: string;
+  /** Regras de normalização que tornaram os nomes equivalentes. */
+  matchedBy: NormalizationRule[];
+  confidence: DuplicateConfidence;
+  items: Array<Pick<AirItem, 'name' | 'kind' | 'path' | 'createdAt' | 'observationKey'>>;
+  /** Sempre suspeita: nomes iguais não provam conteúdo igual. */
+  classification: 'suspected-duplicate';
+  requiresHumanReview: true;
+};
+
+export type NormalizationRule = 'case' | 'diacritics' | 'whitespace' | 'punctuation';
+
+export type Inventory = {
+  schemaVersion: 1;
+  tool: 'air-organizer';
+  runId: string;
+  mode: 'current-folder';
+  readOnly: true;
+  environment: AirEnvironment;
+  startedAt: string;
+  finishedAt: string;
+  coverage: CoverageReport;
+  items: AirItem[];
+  duplicateSuspicions: DuplicateSuspicion[];
+};
+
+/* ───────────── Leitura recursiva controlada (POC-01D) ───────────── */
+
+/** Limites obrigatórios de uma leitura recursiva. Nunca são aumentados automaticamente. */
+export type TreeLimits = {
+  /** Profundidade máxima a partir da pasta inicial (0 = só a pasta inicial). */
+  maxDepth: number;
+  /** Pastas lidas no total, incluindo a inicial. */
+  maxFolders: number;
+  /** Itens lidos no total (verificado ao fim de cada página). */
+  maxItems: number;
+  maxPagesPerFolder: number;
+};
+
+export type FolderStatus = 'complete' | 'partial' | 'failed' | 'skipped';
+
+/** Motivos de pendência. Códigos sem nomes: seguros para logs e relatórios diagnósticos. */
+export type PendingReason =
+  | 'max-depth'
+  | 'max-folders'
+  | 'max-items'
+  | 'max-pages'
+  | 'read-incomplete'
+  | 'read-error'
+  | 'unknown-items'
+  | 'homonym'
+  /** Item listado na pasta com "Caminho" de outro ramo: não é aberto (pode estar fora do escopo). */
+  | 'location-mismatch'
+  | 'open-refused'
+  | 'cycle'
+  | 'repeated-visit'
+  | 'navigation-lost'
+  | 'return-failed'
+  | 'run-aborted';
+
+export type FolderNode = {
+  /** Referência sequencial da execução (F1 = pasta inicial). Não é ID do AIR. */
+  ref: string;
+  parentRef?: string;
+  depth: number;
+  /** Resultado da leitura da PRÓPRIA pasta (listagem de filhos diretos). */
+  status: FolderStatus;
+  /** Resultado da pasta e de todos os descendentes dentro do escopo. */
+  subtreeStatus: FolderStatus;
+  reasons: PendingReason[];
+  /** Código da recusa antes do clique, quando reasons inclui 'open-refused'. */
+  refusal?: string;
+  counts: { items: number; folders: number; files: number; unknown: number; locationMismatch: number; pagesRead: number; unreadPages: number[] };
+  issueKinds: ScanIssueKind[];
+  /* ── Campos identificáveis: só saem no inventário detalhado, com confirmação. ── */
+  name: string;
+  path?: string;
+  pageUrl?: string;
+  items: AirItem[];
+  /** Mensagens de diagnóstico (podem conter nomes). */
+  diagnostics: string[];
+};
+
+export type TreeResult = {
+  status: 'complete' | 'partial' | 'failed';
+  limits: TreeLimits;
+  /** Interrupção da execução inteira (navegação incerta): nenhum clique depois disso. */
+  abort?: { reason: 'navigation-lost' | 'return-failed'; atRef: string; message: string };
+  limitsReached: Array<'max-depth' | 'max-folders' | 'max-items' | 'max-pages'>;
+  folders: FolderNode[];
+  totals: { foldersRead: number; foldersPending: number; items: number; folders: number; files: number; unknown: number };
+};
+
+/** Evento de progresso. Nunca contém nomes, caminhos ou URLs. */
+export type TreeEvent = {
+  type: 'folder-read' | 'folder-pending' | 'limit-reached' | 'aborted';
+  ref: string;
+  depth: number;
+  status?: FolderStatus;
+  reasons?: PendingReason[];
+  items?: number;
+  pages?: number;
+};

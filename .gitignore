@@ -1,0 +1,85 @@
+node_modules/
+dist/
+
+# Saídas locais (inventários, diagnósticos, checkpoints, logs) — nunca versionar
+output/
+logs/
+checkpoints/
+inventory*.json
+tree-*.json
+*.jsonl
+*.log
+
+# Documentos, planilhas e capturas de tela — o repositório não guarda documentos do AIR
+*.pdf
+*.doc
+*.docx
+*.xls
+*.xlsx
+*.csv
+*.ppt
+*.pptx
+*.odt
+*.ods
+*.rtf
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.webp
+*.tif
+*.tiff
+*.heic
+screenshots/
+capturas/
+
+# Perfis e sessões de navegador — nunca versionar
+.chrome-profile/
+chrome-profile/
+chrome-user-data/
+user-data/
+User Data/
+playwright/.auth/
+.auth/
+storage-state*.json
+*.har
+
+# Cookies, credenciais e segredos — nunca versionar
+.env
+.env.*
+!.env.example
+.npmrc
+cookies*
+*.cookies
+credentials*
+secrets*
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+
+# Traces, vídeos e relatórios de teste
+test-results/
+playwright-report/
+blob-report/
+coverage/
+traces/
+trace*.zip
+*.trace
+*.webm
+junit*.xml
+
+# Temporários
+tmp/
+temp/
+*.tmp
+*.temp
+*.bak
+*.swp
+~$*
+
+.DS_Store
+Thumbs.db
+desktop.ini
