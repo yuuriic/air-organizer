@@ -7,6 +7,7 @@ logs/
 checkpoints/
 inventory*.json
 tree-*.json
+structural-diagnostics*.json
 *.jsonl
 *.log
 

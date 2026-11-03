@@ -1,7 +1,7 @@
 {
   "name": "air-organizer",
   "version": "0.1.0",
-  "description": "Ferramenta local e supervisionada para inventário read-only de pastas no AIR (POC-01).",
+  "description": "Ferramenta local e supervisionada para inventário read-only de pastas no AIR e diagnóstico estrutural local dos inventários exportados (POC-02A).",
   "private": true,
   "type": "module",
   "engines": {

@@ -277,6 +277,25 @@ export type TreeResult = {
 export type ResumeMode = 'fast' | 'verified';
 
 /**
+ * Conteúdo de `tree-inventory.json` (opções 6/7, exportado só com confirmação): o TreeResult com
+ * os metadados da sessão. IDENTIFICÁVEL. Entrada do diagnóstico estrutural (POC-02A).
+ * Exportações anteriores à POC-01E não têm `verification`, `navigation` nem `resume`.
+ */
+export type TreeInventoryExport = Omit<TreeResult, 'verification' | 'navigation'> &
+  Partial<Pick<TreeResult, 'verification' | 'navigation'>> & {
+    schemaVersion: 2;
+    tool: 'air-organizer';
+    mode: 'recursive';
+    readOnly: true;
+    identifiable: true;
+    runId: string;
+    checkpointRunId?: string;
+    startedAt: string;
+    finishedAt: string;
+    environment: AirEnvironment;
+  };
+
+/**
  * Por que a navegação foi dada como perdida, sem dados identificáveis: código da verificação que
  * falhou e, numa espera esgotada, o resultado de cada condição e as leituras que falharam.
  */
