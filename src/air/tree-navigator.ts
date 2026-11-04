@@ -40,7 +40,7 @@ export function createAirTreeNavigator(
       }
       const env = await detectEnvironment(page, operator);
       const source = createAirListingSource(page, fingerprintOf(env), operator, options);
-      return scanListing(source, { maxPages: limits.maxPages, maxItems: limits.maxItems, readTimeoutMs: options.readTimeoutMs });
+      return scanListing(source, { maxPages: limits.maxPages, maxItems: limits.maxItems, readTimeoutMs: options.readTimeoutMs, ...(limits.signal ? { signal: limits.signal } : {}) });
     },
 
     async open(parent, parentScan, child: ChildRef): Promise<FolderView> {

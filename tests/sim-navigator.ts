@@ -73,7 +73,7 @@ export class SimNavigator implements TreeNavigator {
     return this.viewOf(this.top());
   }
 
-  async scan(limits: { maxPages: number; maxItems: number }): Promise<ScanResult> {
+  async scan(limits: { maxPages: number; maxItems: number; signal?: AbortSignal }): Promise<ScanResult> {
     const node = this.top();
     const kids = node.children ?? [];
     const size = this.behavior.pageSize ?? 30;
@@ -104,7 +104,7 @@ export class SimNavigator implements TreeNavigator {
       hasNext: async () => position + 1 < pages.length,
     };
     this.log.push(`scan:${node.id}`);
-    return scanListing(source, { maxPages: limits.maxPages, maxItems: limits.maxItems, readTimeoutMs: 500 });
+    return scanListing(source, { maxPages: limits.maxPages, maxItems: limits.maxItems, readTimeoutMs: 500, ...(limits.signal ? { signal: limits.signal } : {}) });
   }
 
   private pageRows(node: SimNode, page: number): string[] {

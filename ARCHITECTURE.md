@@ -1,6 +1,6 @@
 # AIR Organizer — Arquitetura de Software
 
-> **Status:** arquitetura v1.3 (POC-01E implementada, somente leitura) · **Data:** 03/11/2026  
+> **Status:** arquitetura v1.4 (App Base v0.1, somente leitura) · **Data:** 04/11/2026\
 > **Objetivo:** reduzir o trabalho manual de análise, consolidação e organização de pastas no AIR, começando por uma ferramenta pequena, funcional, segura e reutilizável entre clientes, cidades, setores e implantadores.  
 > **Versão oficial:** este arquivo, no repositório (`air-organizer/ARCHITECTURE.md`). Cópias fora do repositório não são mantidas e não devem ser usadas como referência.  
 > **Dados:** todos os exemplos deste documento são fictícios. Nenhum nome real de cliente, município, setor, pasta ou pessoa deve ser registrado aqui.
@@ -11,7 +11,7 @@ O AIR Organizer é uma automação **externa e supervisionada**, executada local
 
 **Princípios não negociáveis:**
 
-1. **Funcionalidade antes de sofisticação:** entregar valor com CLI e relatórios locais, sem dashboard, backend próprio, qualquer banco de dados ou agentes de IA no MVP.
+1. **Funcionalidade antes de sofisticação:** entregar valor com um aplicativo desktop local e relatórios locais, sem dashboard avançado, backend próprio, qualquer banco de dados ou agentes de IA no MVP.
 2. **Somente interface autorizada:** usar Playwright para interagir com o frontend, sem endpoints privados, chamadas diretas ao backend, engenharia reversa de autenticação ou bypass de permissões.
 3. **Leitura primeiro:** nenhuma operação de escrita nas fases de inspeção e diagnóstico.
 4. **Humano no controle:** nenhum movimento sem plano revisado, aprovação explícita e escopo autorizado.
@@ -63,10 +63,12 @@ Nas leituras somente leitura das POC-01A a 01D, a listagem de pastas expôs:
 6. Escolha de pasta principal e geração de plano de movimentação em **dry-run**.
 7. Em fase posterior: movimentação em pequenos lotes, supervisionada, com verificação pós-operação.
 8. Descoberta e confirmação do ambiente, cliente e setor em cada execução, sem identificadores hardcoded.
+9. **Aplicativo desktop local (Electron) como interface oficial** de operação (§5.2, ADR-017). A CLI permanece como alternativa.
 
 ### Fora do MVP
 
-- Interface web própria, extensão Chrome, aplicativo desktop empacotado.
+- Interface web independente e extensão Chrome.
+- Instalador, assinatura e atualização automática do aplicativo: a v0.1 roda com `npm run app`, e o empacotamento fica para quando houver distribuição a outros implantadores.
 - **Qualquer banco de dados (local ou remoto)**, servidor, sincronização central, integração de API privada.
 - Cadastro de usuários do Organizer: a identidade e as permissões permanecem no AIR.
 - Download, leitura do conteúdo dos PDFs, OCR ou comparação binária de arquivos.
@@ -76,10 +78,11 @@ Nas leituras somente leitura das POC-01A a 01D, a listagem de pastas expôs:
 
 ## 4. Stack e execução
 
-- **Runtime:** Node.js LTS.
+- **Runtime:** Node.js 22.12 ou superior (exigência do Electron para instalar).
 - **Linguagem:** TypeScript em modo `strict`.
 - **Automação:** Playwright para Chrome/Chromium.
-- **CLI:** interface de linha de comando simples; dependências mínimas.
+- **Interface oficial:** aplicativo desktop com Electron e interface em TypeScript puro, HTML e CSS, sem framework (§5.2). `esbuild` compila processo principal, preload e janela.
+- **CLI:** alternativa em linha de comando sobre a mesma camada de operações.
 - **Sem banco de dados:** nenhum PostgreSQL, SQLite, Supabase ou backend próprio no MVP. Processar em memória; usar apenas arquivos JSON/JSONL locais mínimos para inventários opcionais, checkpoints e auditoria, com escrita atômica. Esses arquivos guardam **metadados operacionais**, nunca documentos.
 - **Testes:** runner de testes TypeScript (por exemplo, Vitest) e fixtures HTML sintéticas.
 - **Ambiente:** Windows 11 + VS Code; execução local. WSL é opcional, desde que a conexão com o Chrome seja validada.
@@ -89,10 +92,11 @@ Nas leituras somente leitura das POC-01A a 01D, a listagem de pastas expôs:
 ## 5. Arquitetura lógica
 
 ```text
-CLI / comandos
-      │
-      ▼
-Orquestrador de execução
+Aplicativo desktop (interface oficial)      CLI (alternativa)
+      │ IPC restrito (§5.2)                       │
+      └───────────────┬───────────────────────────┘
+                      ▼
+Orquestrador de execução (src/app)
       ├──────────────► Context Resolver (instância, cliente, setor, raiz)
       ├──────────────► Safety Gate (escopo, permissões, aprovações)
       │
@@ -102,18 +106,18 @@ Orquestrador de execução
       │
       ├──► Duplicate Analyzer ──► candidatos / evidências
       │
-      ├──► Planner ─────────────► plano de movimentação / dry-run
+      ├──► Planner ─────────────► propostas de revisão (hoje); dry-run com destinos (POC-03)
       │
-      └──► Executor ────────────► AIR Mover ─────────► UI AIR / Chrome
+      └──► Executor (POC-03, não implementado) ─► AIR Mover ─► UI AIR / Chrome
                     │
                     └──────────► Verificador + auditoria
 ```
 
-**Regra de dependência:** `core` e `safety` não dependem de Playwright. O módulo `air` implementa adaptadores de UI e pode mudar sem reescrever o algoritmo de análise.
+**Regra de dependência:** `core` e `safety` não dependem de Playwright. O módulo `air` implementa adaptadores de UI e pode mudar sem reescrever o algoritmo de análise. `app` não depende do Electron; só `desktop` depende.
 
 ### 5.1 Estrutura de diretórios
 
-**Implementada (POC-01D):**
+**Implementada (App Base v0.1):**
 
 ```text
 air-organizer/
@@ -140,15 +144,32 @@ air-organizer/
 │   │   ├── checkpoints.ts     # checkpoints locais: chave HMAC, escrita atômica, trava, retenção
 │   │   ├── inventory-files.ts # inventários exportados, relatórios estruturais e planos em output/
 │   │   └── integrity-key.ts   # subchave HKDF dos selos, derivada da chave local (POC-02B.1)
+│   ├── app/                   # orquestração sem interface, usada pelo aplicativo e pela CLI
+│   │   ├── controller.ts      # operações do aplicativo: uma por vez, visões sem nomes, erros seguros
+│   │   ├── tree-run.ts        # leitura recursiva com checkpoint, exportação e execuções retomáveis
+│   │   ├── folder-operations.ts # conexão e leitura de uma pasta
+│   │   ├── local-analysis.ts  # diagnóstico e planejamento sobre inventário gravado
+│   │   ├── connection.ts      # sessão única do Chrome dedicado
+│   │   ├── settings.ts        # settings.json local, validado e sem segredos
+│   │   ├── validation.ts      # validação das entradas vindas da janela
+│   │   ├── labels.ts          # textos de resultado compartilhados
+│   │   └── runtime.ts         # parâmetros operacionais
+│   ├── desktop/
+│   │   ├── main.ts            # ponto de entrada do Electron
+│   │   ├── shell.ts           # janela, bloqueios de segurança e registro do IPC
+│   │   ├── preload.ts         # ponte mínima entre janela e processo principal
+│   │   ├── ipc-contract.ts    # lista fixa de operações e validação da origem
+│   │   └── ui/                # telas (HTML, CSS e TypeScript, sem acesso a Node)
 │   ├── cli/
 │   │   ├── index.ts           # menu interativo
 │   │   └── args.ts            # --url / AIR_ORGANIZER_URL
 │   └── types/
 │       └── inventory.ts       # contratos
+├── scripts/                   # compilação e inicialização do aplicativo
 ├── tests/
 │   ├── fixtures/              # HTML sintético
 │   ├── unit/
-│   └── integration/           # Chrome headless sobre as fixtures
+│   └── integration/           # Chrome sobre as fixtures; aplicativo e CLI reais, só no Windows
 ├── output/                    # ignorado pelo Git
 ├── .env.example               # apenas parâmetros não sensíveis
 ├── .gitignore
@@ -167,6 +188,30 @@ air-organizer/
 | `core/planner.ts` | POC-02 | DAG de operações e dry-run |
 | `safety/audit.ts`, `safety/approvals.ts` | POC-02/03 | eventos, reconciliação, aprovação humana |
 | `air/mover.ts` | POC-03 | movimentação supervisionada; **desabilitada** até autorização |
+
+### 5.2 Aplicativo desktop (App Base v0.1, implementado)
+
+O aplicativo Electron é a **interface oficial** (ADR-017). Ele não reescreve o backend: o processo principal do Electron é um processo Node.js e importa os módulos existentes. A automação continua no **Chrome dedicado**, um processo separado controlado pelo Playwright, e a janela do Electron nunca abre o AIR.
+
+| Camada | Responsabilidade | Não faz |
+|---|---|---|
+| `desktop/ui` | Telas, confirmações e exibição | Acessar Node, arquivos, rede ou o AIR |
+| `desktop/preload.ts` | Expor `window.airOrganizer` com as operações do contrato | Expor `ipcRenderer` ou canais genéricos |
+| `desktop/shell.ts` | Janela, bloqueios de segurança, registro do IPC, encerramento | Regra de negócio |
+| `app/` | Sequência das operações, estado da sessão, visões sem nomes | Depender do Electron |
+| `air`, `core`, `safety`, `storage` | Regras existentes, sem mudança de critério | Conhecer a interface |
+
+**Comunicação segura por IPC:**
+
+- **Janela isolada:** `contextIsolation` e `sandbox` ligados, `nodeIntegration` e `webviewTag` desligados, sem menu, com CSP `default-src 'none'` e scripts e estilos só do próprio aplicativo.
+- **Sem saída:** a sessão da janela cancela requisições fora dos arquivos do aplicativo e nega permissões; navegação, redirecionamento e novas janelas são bloqueados.
+- **Contrato fixo:** `ipc-contract.ts` lista as operações, cada uma em um canal `api:<operação>`, e nenhuma escreve no AIR. Eventos do processo principal chegam por um único canal (`app:event`).
+- **Origem validada:** cada chamada confere se vem da página principal do próprio aplicativo. Outra origem é recusada.
+- **Entrada não confiável:** tudo o que vem da janela é validado no processo principal (`app/validation.ts`, `app/settings.ts`). A janela indica inventários, execuções e subpastas por **identificador**: caminhos de arquivo nunca vêm dela.
+- **Saída mínima:** por padrão, a janela recebe só visões sem nomes, caminhos nem URLs. Os nomes exigem confirmação e operação própria. Erros chegam como código e mensagem seguros, porque o texto original pode citar pastas ou URLs.
+- **Texto como dado:** a interface usa só `textContent` e elementos criados por código, sem `innerHTML`.
+
+**Regras de operação:** uma operação por vez; uma instância do aplicativo e um contexto do Chrome; o Chrome só fica "Aberto" depois da navegação inicial; com várias abas, a escolha é explícita e guarda a aba, não a posição. Ações só ficam habilitadas quando podem executar de verdade. Configurações ficam em `settings.json` no perfil do usuário, só com parâmetros que a CLI já suporta por variável de ambiente, que continua tendo precedência.
 
 ## 6. Modelo de dados mínimo
 
@@ -298,7 +343,7 @@ type ExecutionContext = {
 
 ### 7.2 Modos
 
-**Implementado (CLI interativa):** pasta atual (opção 2), uma subpasta com ida e volta (opção 3) e árvore a partir da pasta exibida, com limites (opção 6).
+**Implementado (aplicativo e CLI):** pasta atual, uma subpasta com ida e volta e árvore a partir da pasta exibida, com limites. Uma leitura ampla é a árvore a partir da pasta mais alta desejada, com limites informados pelo operador.
 
 **Planejado:**
 
@@ -339,7 +384,7 @@ A leitura recursiva (`core/tree-scanner.ts`) é uma **DFS** sobre a interface `T
 
 **Causa da recusa.** Antes do clique, nada na linha distingue duas irmãs com o mesmo nome. Não há ID verificado nas linhas (§2.1). Depois do clique, título, breadcrumb e "Caminho" são iguais para as duas. Só a **URL** da pasta aberta (`/air/my-air/<id>`, observada na POC-01C) as diferencia.
 
-**Modo `homonyms: 'identify-by-url'`** (implementado e testado só em simulação e fixture; **desligado por padrão e não habilitado na CLI**):
+**Modo `homonyms: 'identify-by-url'`** (implementado e testado só em simulação e fixture; **desligado por padrão e não habilitado no aplicativo nem na CLI**):
 
 - A linha (página + índice) é só **localizador temporário**. Antes do clique: página reposicionada idêntica à lida (assinatura), nome, tipo e célula conferidos, e a página precisa ter **exatamente** as linhas com esse nome lidas antes (`expectedSameNameRows`). Sem essa contagem, por exemplo na opção 3, qualquer homônimo é recusado.
 - Depois do clique: identidade como em qualquer subpasta (URL nova, título, breadcrumb, "Caminho"). A **identidade persistente é a URL**: duas linhas que levam à mesma pasta geram a pendência `homonym`, e o inventário fica parcial. O grupo só fica completo se cada linha levar a uma pasta diferente, todas filhas do mesmo pai com o mesmo nome.
@@ -402,8 +447,17 @@ O caminho `inferred` **não é prova de identidade**. Na abertura de uma subpast
 **Modos de retomada (decisão da POC-01E):** a mesma DFS serve aos dois; o modo só decide se o passo 3 (reaproveitamento) é permitido.
 
 - **RÁPIDO** (`fast`): reaproveita subárvores assentadas pela linha no pai. O conteúdo interno não é revalidado. O resultado traz `verification.contentRevalidated = false` e **nunca** é elegível para planejamento (`eligibleForPlanning = false`), mesmo completo.
-- **VERIFICADO** (`verified`, padrão na CLI): nada é reaproveitado. Toda pasta do escopo é reaberta e relida desde a página 1, sem presumir que a linha do pai reflete mudanças internas. O checkpoint dá continuidade (mesma execução, sessões registradas) e **comparação**: cada pasta relida é `unchanged`, `changed` (total ou assinatura de alguma página em comum diferente) ou `new` (sem registro, ou registrada mas nunca aberta), e subpastas registradas ausentes da listagem relida, quando ela está completa, contam como `removed`. O custo é o de uma leitura nova.
+- **VERIFICADO** (`verified`, padrão no aplicativo e na CLI): nada é reaproveitado. Toda pasta do escopo é reaberta e relida desde a página 1, sem presumir que a linha do pai reflete mudanças internas. O checkpoint dá continuidade (mesma execução, sessões registradas) e **comparação**: cada pasta relida é `unchanged`, `changed` (total ou assinatura de alguma página em comum diferente) ou `new` (sem registro, ou registrada mas nunca aberta), e subpastas registradas ausentes da listagem relida, quando ela está completa, contam como `removed`. O custo é o de uma leitura nova.
 - Nos dois modos valem os mesmos limites (por execução) e as mesmas regras de completude. `eligibleForPlanning = status complete e nenhuma pasta reaproveitada`. **Nenhum modo promete consistência transacional:** o AIR pode mudar durante a própria leitura.
+
+#### 7.7.1 Parada controlada (App Base v0.1)
+
+`scanTree` e `scanListing` recebem um `AbortSignal` opcional. O sinal é conferido em dois pontos: entre páginas de uma pasta e imediatamente antes de abrir uma subpasta. Depois dele, nenhuma página nova é lida e nenhuma subpasta é aberta, e a pilha volta normalmente aos pais, com as verificações de sempre.
+
+- A pasta interrompida fica `partial` (`read-incomplete`, com as páginas restantes em `unreadPages`) e as subpastas não abertas ficam `run-aborted`. Os dois motivos são retomáveis: a retomada não os ignora.
+- O resultado leva `stopped: true` e status `partial`, logo nunca é elegível para planejamento. Se tudo já tinha sido lido quando o sinal chegou, o resultado é completo e sem `stopped`.
+- Falha ao voltar depois da parada continua sendo `return-failed`, e não parada limpa.
+- **Fechar o Chrome não é o mecanismo normal de interrupção.** Só existe como recuperação, depois de pedir a parada, para uma leitura que não termina. Encerramento abrupto do processo deixa o último checkpoint íntegro, e a trava órfã é substituída.
 
 ### 7.8 Reposicionamento em paginadores com reticências (POC-01E)
 
@@ -417,7 +471,7 @@ Com muitas páginas, o AIR real mostra a primeira, a atual ± 1 e a última, com
 
 Controles usados: só os já validados no AIR real (botão numérico dentro do paginador e "próxima" pelo ícone). Com a janela "atual ± 1" do AIR real, cada clique numérico desloca a janela e os números bastam; "próxima" fica para paginadores sem vizinhas. Reticências (`<span>`) nunca são candidatas. **Campo "Ir":** existe no AIR real (`<input type="number" placeholder="Página" min="1" max="<última>">` + botão "Ir"), mas **não é usado**: digitar num campo é uma ação nova fora da allowlist e exige aprovação arquitetural específica. O custo é de até *k* cliques, sempre com *k* ≤ páginas lidas ≤ `maxPagesPerFolder`. Validado no AIR real com saltos entre páginas já lidas da mesma pasta (inclusive para páginas ocultas pelas reticências).
 
-**Achado da validação real (POC-01E), em aberto:** a volta de uma subpasta do 3º nível **depois de paginá-la** falhou (`return-failed`, com falha fechada). Hipótese: trocar de página cria entrada no histórico, e o "voltar" do cabeçalho (`history.back()`, usado quando o pai está colapsado no breadcrumb) retorna à página anterior da própria subpasta. Correções possíveis, a decidir após diagnóstico só de leitura (`history.length` antes e depois de "próxima"): (a) voltar à página 1 da subpasta antes de usar o "voltar" — só resolve se o histórico for empilhado por página; (b) usar o "voltar" repetidamente, conferindo a pasta a cada passo — exige limite e verificação rigorosos; (c) não paginar subpastas do 3º nível em diante até haver um mecanismo de volta seguro.
+**Achado da validação real (POC-01E), já resolvido (a hipótese abaixo foi refutada; ver "Causa confirmada" mais adiante nesta seção):** a volta de uma subpasta do 3º nível **depois de paginá-la** falhou (`return-failed`, com falha fechada). Hipótese: trocar de página cria entrada no histórico, e o "voltar" do cabeçalho (`history.back()`, usado quando o pai está colapsado no breadcrumb) retorna à página anterior da própria subpasta. Correções possíveis, a decidir após diagnóstico só de leitura (`history.length` antes e depois de "próxima"): (a) voltar à página 1 da subpasta antes de usar o "voltar" — só resolve se o histórico for empilhado por página; (b) usar o "voltar" repetidamente, conferindo a pasta a cada passo — exige limite e verificação rigorosos; (c) não paginar subpastas do 3º nível em diante até haver um mecanismo de volta seguro.
 
 **Diagnóstico de identidade (POC-01E).** Toda espera por uma pasta depois de um clique avalia condições **nomeadas** (abrir: `urlChanged`, `titleMatches`; voltar: `urlIsParent`, `titleIsParent`). No tempo esgotado, o erro traz um código e `checks`: o resultado de cada condição na última leitura, as leituras que falharam por código (`heading-breadcrumb-mismatch`, `path-divergent`, `title-missing`, …) e as leituras aceitas mas instáveis. Tudo sem nomes, caminhos nem URLs. Isso vai para `abort.diagnostic` no resultado, no relatório diagnóstico e na CLI. Cada causa possível tem assinatura própria, testada em fixture: clique sem navegação (`urlChanged=false`); carregamento lento ou pasta errada (`urlChanged=true`, `titleMatches=false`); título ou breadcrumb divergentes (`heading-breadcrumb-mismatch`); "Caminho" divergente (`path-divergent`) ou diferente do esperado (`path-mismatch`). O prazo não foi aumentado: a causa precisa ser identificada antes.
 
@@ -540,11 +594,11 @@ Regras:
 
 ### 9.1 Motor de planejamento determinístico (POC-02B.2, implementado)
 
-`core/organization-planner.ts`, motor puro (sem navegador, rede, processos nem sistema de arquivos), opção 9 da CLI. Transforma um `tree-inventory.json` **autenticado e elegível** em **propostas de revisão** para uma pessoa avaliar. Nenhuma proposta é executável, e nenhuma autoriza mover, excluir, mesclar ou renomear nada no AIR.
+`core/organization-planner.ts`, motor puro (sem navegador, rede, processos nem sistema de arquivos), tela Planejamento do aplicativo e opção 9 da CLI. Transforma um `tree-inventory.json` **autenticado e elegível** em **propostas de revisão** para uma pessoa avaliar. Nenhuma proposta é executável, e nenhuma autoriza mover, excluir, mesclar ou renomear nada no AIR.
 
-**Revalidação na geração.** O plano não confia em relatório nem em flag gravados. Na hora da geração ele (1) roda `analyzeStructure` de novo, o que confere estrutura, selo (§8.5) e idade, e (2) aplica uma checagem própria da completude a partir das **pastas** (`planningBasisProblems`): status geral e de cada pasta/subárvore `complete`, nenhuma reaproveitada, sem pendências, sem `content-changed`, sem `abort`, sem limite atingido, retomada só VERIFICADA. Qualquer dúvida = **plano recusado, sem propostas**: sem selo, não verificável, selo inválido, FAST, parcial, expirado ou inconsistente. A exploração continua na opção 8.
+**Revalidação na geração.** O plano não confia em relatório nem em flag gravados. Na hora da geração ele (1) roda `analyzeStructure` de novo, o que confere estrutura, selo (§8.5) e idade, e (2) aplica uma checagem própria da completude a partir das **pastas** (`planningBasisProblems`): status geral e de cada pasta/subárvore `complete`, nenhuma reaproveitada, sem pendências, sem `content-changed`, sem `abort`, sem limite atingido, retomada só VERIFICADA. Qualquer dúvida = **plano recusado, sem propostas**: sem selo, não verificável, selo inválido, FAST, parcial, expirado ou inconsistente. A exploração continua no Diagnóstico (opção 8 na CLI).
 
-**Consequência importante:** irmãs que diferem só por caixa, acento ou pontuação são lidas (§7.5.1) e podem gerar propostas de "nomes equivalentes". Irmãs com nome **exatamente** igual não são abertas na configuração da CLI: o inventário fica parcial e o plano é recusado, enquanto o modo `identify-by-url` estiver desativado (§7.5.1, §15).
+**Consequência importante:** irmãs que diferem só por caixa, acento ou pontuação são lidas (§7.5.1) e podem gerar propostas de "nomes equivalentes". Irmãs com nome **exatamente** igual não são abertas no aplicativo nem na CLI: o inventário fica parcial e o plano é recusado, enquanto o modo `identify-by-url` estiver desativado (§7.5.1, §15).
 
 **Proposta** (`PlanProposal`), em quatro partes separadas:
 
@@ -622,6 +676,7 @@ A implementação do `AIR Mover` fica **desabilitada** até a validação do sca
 - Relatórios devem conter metadados mínimos necessários (ver §11.1).
 - Nenhum envio a serviços de IA de dados internos sem aprovação expressa.
 - Adotar retenção e descarte conforme política da organização (LGPD: finalidade, necessidade e segurança). A ferramenta não apaga saídas antigas sozinha.
+- Aplicativo: janela isolada, IPC restrito e `settings.json` sem segredos (§5.2).
 - Repositório público: testes, fixtures, comentários e documentação usam **somente dados sintéticos** (domínio `.test`, nomes fictícios). O `.gitignore` cobre saídas, documentos, capturas, perfis de navegador, credenciais, traces e temporários.
 
 ### 11.1 Política de exportação e de logs (implementada)
@@ -636,7 +691,7 @@ Nomes de pastas e arquivos podem conter dados pessoais e sensíveis. Por isso h�
 | `inventory.json` (opção 5), `tree-inventory.json` (opção 6) | inventário identificável, com `identifiable: true` na leitura recursiva; o `tree-inventory.json` leva o selo HMAC `integrity` (§8.5), sem chave | **somente após confirmação explícita** do operador, a cada exportação |
 
 - Valores do ambiente (domínio, URL, pasta, breadcrumb, cliente, setor) aparecem no console só como "identificado/não identificado" e fonte.
-- Mensagens de erro e de pendência podem citar nomes. No console aparecem só pelo tipo. A exceção é a opção 3, cuja finalidade é escolher uma subpasta pelo nome. `AIR_ORGANIZER_VERBOSE_ERRORS=1` é um opt-in local de depuração.
+- Mensagens de erro e de pendência podem citar nomes. No console aparecem só pelo tipo. A exceção é a opção 3, cuja finalidade é escolher uma subpasta pelo nome. `AIR_ORGANIZER_VERBOSE_ERRORS=1` é um opt-in local de diagnóstico e pode expor nomes de pastas, caminhos e URLs; a saída não deve ser compartilhada.
 - Suspeitas de duplicidade (opção 4) aparecem por referência, confiança e regras. Os nomes exigem confirmação.
 - Os diretórios em `output/` derivam do domínio e do setor (slug + hash). Eles ficam só no disco local, fora do Git, e não são exibidos no console.
 
@@ -696,6 +751,12 @@ Critérios de aceite:
 - Impedir planos com ciclo, setor divergente ou destino ambíguo.
 - Gerar plano revisável e **não executar movimentos**.
 
+### App Base v0.1 (entregue)
+
+**Objetivo:** tornar as funcionalidades existentes operáveis por uma interface gráfica mínima, sem mudar critérios nem reescrever o backend.
+
+Entregue: janela Electron com IPC restrito (§5.2); conexão pelo Chrome dedicado; leitura direcionada e recursiva com progresso real; parada controlada e retomada (§7.7.1); diagnóstico; planejamento não executável; configurações locais. Validado manualmente pelo operador no Windows, no AIR real: conexão, leitura direcionada, leitura recursiva, interrupção e retomada. Diagnóstico e Planejamento também foram executados com inventários reais, conforme os arquivos gravados localmente, sem validação completa das propostas. O modo de retomada usado não está registrado.
+
 ### POC-03 — Movimentação supervisionada
 
 **Pré-requisitos:** autorização da organização e ambiente de teste/homologação preferencialmente, ou cenário de produção explicitamente autorizado; POC-01 e POC-02 aprovadas.
@@ -713,6 +774,7 @@ Critérios de aceite:
 
 - **Unitários:** normalização, comparação de nomes, detecção de ciclos, escopo de setor, ordenação de dependências, checkpoint.
 - **Integração local:** fixtures HTML sintéticas para tabelas, paginação, seleção e mudança de conteúdo.
+- **Aplicativo e CLI reais (só no Windows):** janela, IPC, Chrome dedicado, interrupções e menu da CLI sobre fixtures sintéticas, com perfil, chave e saídas temporários. O aplicativo de teste tem outro ponto de entrada; não há atalho de teste no código de produção.
 - **Read-only real:** Chrome em sessão autorizada, pasta pequena, nenhuma ação de escrita.
 - **Movimentação:** somente em cenário aprovado, com dados de teste e conferência humana.
 - **Regressão:** fixtures do bug de seleção entre páginas; testes devem falhar se o executor confiar apenas no estado visual.
@@ -731,8 +793,11 @@ Critérios de aceite:
 | Scan longo / grande volume | Checkpoint por passo e retomada por subárvore (§7.7) |
 | Pastas homônimas não mesclam | Planejamento recursivo e resolução explícita de conflitos |
 | Caminho `uniform` aceito sem conferir título e breadcrumb (dívida técnica, §7.5.2) | Mantido; avaliar com evidência do AIR real antes de exigir a coerência |
-| Irmãs com nome exatamente igual não são abertas (CLI) | Inventário com elas fica parcial e o plano é recusado (§9.1). Modo `identify-by-url` implementado, mas desativado: estabilidade da URL sem comprovação no AIR real (§7.5.1) |
+| Irmãs com nome exatamente igual não são abertas (aplicativo e CLI) | Inventário com elas fica parcial e o plano é recusado (§9.1). Modo `identify-by-url` implementado, mas desativado: estabilidade da URL sem comprovação no AIR real (§7.5.1) |
 | Plano de organização editado depois de gravado | Plano não é autenticado nem executável; qualquer etapa futura gera o plano de novo a partir de inventário autenticado e recente (ADR-016) |
+| Critério rígido deixa inventários reais fora do planejamento | Homônimos exatos e itens de outro ramo tornam a leitura parcial e o plano é recusado. Medir a frequência no uso real antes da POC-03; a exploração continua no Diagnóstico |
+| `output/` relativo à pasta de execução | Sem efeito com `npm run app`; precisa de local fixo antes de um instalador |
+| Testes do aplicativo só no Windows | O CI (Ubuntu) os ignora; rodar `npm test` no Windows antes de integrar |
 | Controle de Chrome existente | Validar conexão segura e isolada; não presumir acesso automático |
 | Restrições de política da empresa | Confirmar autorização antes de automatizar produção |
 
@@ -763,14 +828,15 @@ Critérios de aceite:
 - **ADR-014 — Diagnóstico estrutural determinístico e desacoplado (POC-02A):** motor puro sobre o inventário exportado, sem navegador, rede ou banco de dados; valida a consistência antes das regras (inconsistência = recusado, sem achados); herda a elegibilidade da leitura (só `planning-eligible` fundamenta planos); regras conservadoras e nomeadas, certeza sem probabilidades, revisão humana obrigatória, sem sugestões de renomear/mover/mesclar; saída padrão redigida (§8.4).
 - **ADR-015 — Selo de integridade dos inventários (POC-02B.1):** o `tree-inventory.json` é selado na gravação com HMAC-SHA256, usando uma subchave HKDF-SHA256 derivada da chave local dos checkpoints (propósitos separados, um único segredo), sobre o JSON canônico do documento inteiro e do cabeçalho. A subchave vem da chave que o `CheckpointStore` carregou para a execução (sem reler nem recriar a chave na exportação), e o selo é calculado sobre um snapshot independente, o mesmo que é gravado. Só inventário `authenticated` pode ser `planning-eligible`; sem selo (legado ou selo removido, indistinguíveis) ou sem chave = exploratório; selo inválido = recusado. Sem selagem retroativa e sem serviços externos. Integridade autenticada não significa conteúdo atual e não autoriza movimentação (§8.5).
 - **ADR-016 — Planejamento determinístico não executável (POC-02B.2):** propostas de revisão geradas por um motor puro sobre o inventário, revalidando selo, estrutura, completude (pelas pastas) e idade no momento da geração; inelegível = recusa sem propostas. IDs incorporam a identidade do inventário autenticado. `confidence` é força de evidência, nunca autorização. Possível ação futura só como hipótese não executável, sem origem/destino; nenhum formato de comandos. O plano não é autenticado e não serve de fonte para execução sem nova leitura e revalidação (§9.1).
+- **ADR-017 — Aplicativo desktop Electron como interface oficial (App Base v0.1):** a interface oficial passa a ser um aplicativo desktop local, e não uma interface web independente nem uma extensão Chrome; a CLI permanece como alternativa e para a limpeza de checkpoints expirados. Electron foi escolhido em vez de Tauri porque o processo principal roda os módulos Node.js e o Playwright existentes, sem reescrita, sem sidecar e sem uma segunda linguagem. O custo aceito é um instalador maior e mais um Chromium em memória. A orquestração saiu da CLI para `src/app`, sem depender do Electron, e as duas interfaces a compartilham. A janela não acessa Node e só fala com o processo principal por uma lista fixa de operações (§5.2). A parada usa `AbortSignal`, com alteração mínima no scanner, e fechar o Chrome fica só como recuperação (§7.7.1). A limpeza de checkpoints fica fora da interface. Critérios de elegibilidade e regras de segurança não mudaram, e nada escreve no AIR.
 
 ## 18. Próxima ação concreta
 
-**Situação:** a POC-02A está entregue (§8.4, ADR-014). O diagnóstico estrutural roda localmente sobre o `tree-inventory.json` exportado, sem navegador nem acesso ao AIR. Ele produz só achados para revisão humana e nenhum plano operacional. A POC-02B.1 está entregue (§8.5, ADR-015): os inventários são selados com HMAC local, e só inventários autenticados podem ser elegíveis. A POC-02B.2 está entregue (§9.1, ADR-016): a opção 9 gera propostas de revisão determinísticas e não executáveis, só a partir de inventários autenticados, completos e recentes.
+**Situação:** a App Base v0.1 está entregue (§5.2, ADR-017), estritamente somente leitura, sobre a POC-01 (leitura e retomada, §7), a POC-02A (diagnóstico, §8.4), a POC-02B.1 (selo, §8.5) e a POC-02B.2 (planejamento não executável, §9.1). O achado do `return-failed` após paginar está diagnosticado e corrigido (§7.8).
 
-Pendências da leitura (POC-01E), ainda abertas antes de abrir PR para uso operacional: (1) diagnosticar, só por leitura, o achado do `return-failed` (§7.8): `history.length` antes e depois de trocar de página numa subpasta; (2) decidir e implementar a correção da volta do 3º nível após paginação; (3) validar no AIR real a retomada VERIFICADA e a abertura de subpasta em página oculta. Depois: decidir sobre o campo "Ir".
+Pendências de validação no AIR real: cada modo de retomada isoladamente e abertura de subpasta em página oculta (README, "Limitações conhecidas"). Decidir sobre o campo "Ir" continua em aberto.
 
-Próxima etapa: aplicativo base e movimentação supervisionada (POC-03), seguindo as regras do §9 e do §9.2, a partir de inventários `planning-eligible` (autenticados) e com os pré-requisitos da POC-03. `homonyms: 'identify-by-url'` continua desativado, sem nova investigação (§7.5.1). O escopo do aplicativo base ainda precisa ser decidido: o §3 lista interface própria e aplicativo desktop empacotado como fora do MVP.
+**Próxima etapa:** POC-03, movimentação supervisionada, seguindo as regras do §9 e do §9.2 e os pré-requisitos da seção POC-03 (§13). Antes, medir com que frequência inventários reais ficam elegíveis para planejamento (§15). `homonyms: 'identify-by-url'` continua desativado, sem nova investigação (§7.5.1). Não implementar nem habilitar `mover.ts` sem a autorização correspondente.
 
 ---
 

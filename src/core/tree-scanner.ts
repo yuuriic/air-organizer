@@ -51,7 +51,7 @@ export interface TreeNavigator {
   /** Pasta exibida agora. */
   current(): Promise<FolderView>;
   /** Lê as páginas da pasta exibida, a partir da 1ª. */
-  scan(limits: { maxPages: number; maxItems: number }): Promise<ScanResult>;
+  scan(limits: { maxPages: number; maxItems: number; signal?: AbortSignal }): Promise<ScanResult>;
   /**
    * Abre a subpasta e confirma a identidade. Deve lançar OpenRefusedError quando recusar
    * ANTES de clicar (a pasta exibida continua sendo `parent`); qualquer outro erro significa
@@ -99,6 +99,12 @@ export type TreeScanOptions = {
    * comparados exatamente) e são abertos nos dois modos.
    */
   homonyms?: 'refuse' | 'identify-by-url';
+  /**
+   * Parada controlada pelo operador. Depois do sinal: nenhuma subpasta nova é aberta nem página nova
+   * é lida, a pilha volta normalmente aos pais e o resultado fica parcial, com o que faltou pendente
+   * e retomável. A pasta interrompida nunca conta como completa.
+   */
+  signal?: AbortSignal;
 };
 
 function message(error: unknown): string {
@@ -151,6 +157,7 @@ export async function scanTree(nav: TreeNavigator, limits: TreeLimits, options: 
   let contentChanged = 0;
   let oldestReused: string | undefined;
   let abort: TreeResult['abort'];
+  let stopped = false;
 
   const node = (name: string | undefined, depth: number, parentRef?: string, rowKey?: string): FolderNode => {
     const n: FolderNode = {
@@ -288,12 +295,13 @@ export async function scanTree(nav: TreeNavigator, limits: TreeLimits, options: 
 
     let scan: ScanResult;
     try {
-      scan = await nav.scan({ maxPages: limits.maxPagesPerFolder, maxItems: Math.max(1, limits.maxItems - itemsRead) });
+      scan = await nav.scan({ maxPages: limits.maxPagesPerFolder, maxItems: Math.max(1, limits.maxItems - itemsRead), ...(options.signal ? { signal: options.signal } : {}) });
     } catch (error) {
       pending(n, 'failed', 'read-error', message(error));
       return;
     }
     const c = scan.coverage;
+    if (c.stopReason === 'stopped') stopped = true;
     itemsRead += scan.items.length;
     n.items = scan.items;
     m.pages = scan.pages;
@@ -394,6 +402,12 @@ export async function scanTree(nav: TreeNavigator, limits: TreeLimits, options: 
       if (foldersRead >= limits.maxFolders) return pending(child, 'skipped', 'max-folders');
       if (itemsRead >= limits.maxItems) return pending(child, 'skipped', 'max-items');
 
+      // Último ponto antes de um novo clique. Pendência retomável: a retomada abre esta subpasta.
+      if (options.signal?.aborted) {
+        stopped = true;
+        return pending(child, 'skipped', 'run-aborted');
+      }
+
       const ref: ChildRef = {
         name: item.name,
         sourcePage: item.sourcePage,
@@ -481,6 +495,7 @@ export async function scanTree(nav: TreeNavigator, limits: TreeLimits, options: 
     status,
     limits,
     ...(abort ? { abort } : {}),
+    ...(stopped ? { stopped: true as const } : {}),
     limitsReached: [...limitsReached],
     folders,
     totals: totals(),
@@ -503,6 +518,7 @@ export function diagnosticReport(result: TreeResult) {
   return {
     status: result.status,
     limits: result.limits,
+    ...(result.stopped ? { stopped: true } : {}),
     limitsReached: result.limitsReached,
     ...(result.abort
       ? { abort: { reason: result.abort.reason, atRef: result.abort.atRef, ...(result.abort.diagnostic ? { diagnostic: result.abort.diagnostic } : {}) } }

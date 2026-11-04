@@ -4,29 +4,28 @@ import { stdin as input, stdout as output } from 'node:process';
 import type { BrowserContext, Page } from 'playwright';
 import { resolveInstanceUrl } from './args.js';
 import { listVisibleSubfolders, openSubfolder, readFolderContext, returnToParent } from '../air/folders.js';
-import { createAirListingSource, detectEnvironment, probePagination, type OperatorContext } from '../air/navigator.js';
-import { extractListing, ListingNotFoundError } from '../air/reader.js';
+import { detectEnvironment, type OperatorContext } from '../air/navigator.js';
 import { httpPages, launchDedicatedChrome } from '../air/session.js';
-import { createAirTreeNavigator } from '../air/tree-navigator.js';
-import { findDuplicateSuspicions } from '../core/duplicates.js';
-import { scanListing } from '../core/scanner.js';
-import { ResumeRejectedError, compareCheckpointScope, type CheckpointFolder, type CheckpointState } from '../core/checkpoint.js';
-import { formatTreeEvent, scanTree } from '../core/tree-scanner.js';
-import { assertReadOnlyMode, fingerprintOf, sanitizeUrl, validateAnalysisScope } from '../safety/scope-validator.js';
-import { CheckpointStore, DEFAULT_RETENTION_DAYS, defaultCheckpointLocations, type CheckpointEntry, type CheckpointSession } from '../storage/checkpoints.js';
-import { displayPath, exportInventoryResult, exportTreeResult, newRunId } from '../storage/export.js';
-import { describeLocalFailure, exportOrganizationPlan, exportStructuralReport, listTreeInventories, readInventory } from '../storage/inventory-files.js';
-import { formatProposal, planOrganization } from '../core/organization-planner.js';
-import { analyzeStructure, formatFinding, type StructuralReport } from '../core/structural-diagnostics.js';
-import { openVerifyingAuthenticator, type KeyUnavailable } from '../storage/integrity-key.js';
-import { UNSIGNED_INVENTORY_MESSAGE } from '../core/inventory-integrity.js';
-import type { AirEnvironment, Identified, Inventory, ResumeMode, TreeLimits, TreeResult } from '../types/inventory.js';
+import { describePaging, readConnectionSnapshot, readFolderInventory } from '../app/folder-operations.js';
+import { COMPLETENESS_LABEL, ELIGIBILITY_LABEL, MODE_LABEL, STATUS_LABEL, coverageLines, describeLimits, integrityLabel, treeSummaryLines } from '../app/labels.js';
+import { diagnoseInventory, planInventory } from '../app/local-analysis.js';
+import { operationalConfig } from '../app/runtime.js';
+import { TREE_DEFAULTS, exportTreeRun, matchResumableRuns, pendingFolders, runTreeScan } from '../app/tree-run.js';
+import { ResumeRejectedError, type CheckpointFolder } from '../core/checkpoint.js';
+import { formatProposal } from '../core/organization-planner.js';
+import { formatFinding } from '../core/structural-diagnostics.js';
+import { formatTreeEvent } from '../core/tree-scanner.js';
+import { assertReadOnlyMode, sanitizeUrl, validateAnalysisScope } from '../safety/scope-validator.js';
+import { CheckpointStore, defaultCheckpointLocations, type CheckpointEntry, type CheckpointSession } from '../storage/checkpoints.js';
+import { displayPath, exportInventoryResult, newRunId } from '../storage/export.js';
+import { describeLocalFailure, exportOrganizationPlan, exportStructuralReport, listTreeInventories } from '../storage/inventory-files.js';
+import type { AirEnvironment, Identified, Inventory, ResumeMode, TreeLimits } from '../types/inventory.js';
 
 const READ_ONLY = true;
-const MAX_PAGES = Number(process.env.AIR_ORGANIZER_MAX_PAGES ?? 500);
-const PAGE_TIMEOUT_MS = Number(process.env.AIR_ORGANIZER_PAGE_TIMEOUT_MS ?? 15_000);
-const POLL_MS = 300;
-const VERBOSE_ERRORS = process.env.AIR_ORGANIZER_VERBOSE_ERRORS === '1';
+const CONFIG = operationalConfig();
+const PAGE_TIMEOUT_MS = CONFIG.pageTimeoutMs;
+const POLL_MS = CONFIG.pollMs;
+const VERBOSE_ERRORS = CONFIG.verboseErrors;
 const INSTANCE_URL = resolveInstanceUrl(process.argv.slice(2), process.env);
 
 const rl = createInterface({ input, output });
@@ -109,33 +108,21 @@ async function askOperatorContext(): Promise<void> {
 async function checkConnection(): Promise<void> {
   const page = await ensurePage();
   if (!page) return;
-  const env = await detectEnvironment(page, operator);
+  const { environment, listing, paging } = await readConnectionSnapshot(page, operator);
   console.log('\nAmbiente:');
-  printEnvironment(env);
-  try {
-    const listing = await extractListing(page);
+  printEnvironment(environment);
+  if (listing) {
     console.log('\nListagem:');
     console.log(`  Colunas:            ${listing.headers.join(' | ')}`);
-    console.log(`  Linhas visíveis:    ${listing.rows.length}`);
-    console.log(`  Linhas na página:   ${listing.rows.length} (contador da página: ${listing.pageRowCounter ?? 'não identificado'})`);
-    console.log(`  Total da pasta:     ${listing.reportedTotal ?? 'não identificado'} (título ${listing.folderTitle ? 'identificado' : 'não identificado'})`);
+    console.log(`  Linhas visíveis:    ${listing.rows}`);
+    console.log(`  Linhas na página:   ${listing.rows} (contador da página: ${listing.pageRowCounter ?? 'não identificado'})`);
+    console.log(`  Total da pasta:     ${listing.reportedTotal ?? 'não identificado'} (título ${listing.titleIdentified ? 'identificado' : 'não identificado'})`);
     console.log(`  Indicador página:   ${listing.pageIndicator ?? 'não identificado'}`);
-    const idAttrs = new Set(listing.rows.flatMap((r) => Object.keys(r.idCandidates)));
-    console.log(`  Atributos tipo ID:  ${idAttrs.size ? [...idAttrs].join(', ') : 'nenhum'} (não usados até validação manual)`);
-  } catch (error) {
-    if (!(error instanceof ListingNotFoundError)) throw error;
-    console.log(`\n${error.message}`);
+    console.log(`  Atributos tipo ID:  ${listing.idAttributes.length ? listing.idAttributes.join(', ') : 'nenhum'} (não usados até validação manual)`);
+  } else {
+    console.log('\nNenhuma listagem do AIR reconhecida nesta aba.');
   }
-  const probe = await probePagination(page);
-  const paging =
-    probe.status === 'found'
-      ? `botão "${probe.label}" ${probe.disabled ? '(desabilitado)' : '(habilitado)'}`
-      : probe.status === 'ambiguous'
-        ? `ambíguo (${probe.count} controles)`
-        : probe.status === 'rejected'
-          ? `recusado (${probe.reason})`
-          : 'não encontrado (página única ou seletor não suportado)';
-  console.log(`  Paginação:          ${paging}`);
+  console.log(`  Paginação:          ${describePaging(paging)}`);
 }
 
 async function analyzeCurrentFolder(): Promise<void> {
@@ -158,38 +145,10 @@ async function analyzeCurrentFolder(): Promise<void> {
 
 /** Lê todas as páginas da pasta exibida, guarda o inventário da sessão e imprime a cobertura. */
 async function scanAndReport(page: Page, env: AirEnvironment): Promise<void> {
-  const startedAt = new Date().toISOString();
-  const source = createAirListingSource(page, fingerprintOf(env), operator, { timeoutMs: PAGE_TIMEOUT_MS, pollMs: POLL_MS });
-  const result = await scanListing(source, { maxPages: MAX_PAGES, readTimeoutMs: PAGE_TIMEOUT_MS });
-  const duplicateSuspicions = findDuplicateSuspicions(result.items);
-
-  lastInventory = {
-    schemaVersion: 1,
-    tool: 'air-organizer',
-    runId: newRunId(new Date(startedAt)),
-    mode: 'current-folder',
-    readOnly: true,
-    environment: env,
-    startedAt,
-    finishedAt: new Date().toISOString(),
-    coverage: result.coverage,
-    items: result.items,
-    duplicateSuspicions,
-  };
-
-  const c = result.coverage;
+  lastInventory = await readFolderInventory(page, env, operator, CONFIG);
   console.log('\nCobertura:');
-  console.log(`  Páginas lidas:      ${c.pagesRead}${c.expectedPages !== undefined ? ` de ~${c.expectedPages} (estimado)` : ''}`);
-  console.log(`  Itens únicos:       ${c.uniqueItems} (observações: ${c.itemsObserved}, repetidas: ${c.repeatedObservations})`);
-  console.log(`  Total da pasta:     ${c.reportedTotal ?? 'não identificado'} (título)`);
-  console.log(`  Páginas não lidas:  ${c.unreadPages.length ? c.unreadPages.join(', ') : 'nenhuma conhecida'}`);
-  console.log(`  Encerramento:       ${c.stopReason}`);
-  console.log(`  Status:             ${c.complete ? 'COMPLETA' : 'PARCIAL'}`);
-  // A mensagem pode citar URL, pasta ou breadcrumb; ela fica só no inventário detalhado.
-  for (const issue of c.issues) console.log(`  ! [${issue.kind}]${issue.pageNumber !== undefined ? ` página ${issue.pageNumber}` : ''}`);
-  const kinds = result.items.reduce<Record<string, number>>((acc, i) => ({ ...acc, [i.kind]: (acc[i.kind] ?? 0) + 1 }), {});
-  console.log(`  Tipos:              ${Object.entries(kinds).map(([k, n]) => `${k}=${n}`).join(', ') || '-'}`);
-  console.log(`  Suspeitas de duplicidade: ${duplicateSuspicions.length} (opção 4)`);
+  for (const line of coverageLines(lastInventory)) console.log(line);
+  console.log(`  Suspeitas de duplicidade: ${lastInventory.duplicateSuspicions.length} (opção 4)`);
 }
 
 /**
@@ -258,9 +217,6 @@ async function exportLast(): Promise<void> {
   for (const file of await exportInventoryResult(lastInventory, { detailed })) console.log(`  Gravado: ${displayPath(file)}`);
 }
 
-/** Limites conservadores sugeridos para a primeira execução; o usuário confirma cada um. */
-const TREE_DEFAULTS: TreeLimits = { maxDepth: 1, maxFolders: 5, maxItems: 100, maxPagesPerFolder: 2 };
-
 async function askLimit(label: string, fallback: number, min: number): Promise<number> {
   for (;;) {
     const raw = await ask(`  ${label} [${fallback}]: `);
@@ -279,16 +235,10 @@ async function askLimits(defaults: TreeLimits): Promise<TreeLimits> {
   };
 }
 
-const describeLimits = (l: TreeLimits) =>
-  `profundidade ${l.maxDepth}, ${l.maxFolders} pasta(s), ${l.maxItems} itens, ${l.maxPagesPerFolder} página(s) por pasta`;
-
-const STATUS_LABEL: Record<CheckpointState, string> = { running: 'EXECUTANDO', complete: 'CONCLUÍDO', partial: 'PARCIAL', failed: 'INTERROMPIDO' };
-const MODE_LABEL: Record<ResumeMode, string> = { verified: 'VERIFICADA', fast: 'RÁPIDA (conteúdo interno não revalidado)' };
-
 /* ───────────── Checkpoints (POC-01E) ───────────── */
 
 const CHECKPOINT_LOCATIONS = defaultCheckpointLocations();
-const RETENTION_DAYS = Number(process.env.AIR_ORGANIZER_CHECKPOINT_RETENTION_DAYS ?? DEFAULT_RETENTION_DAYS);
+const RETENTION_DAYS = CONFIG.retentionDays;
 let store: CheckpointStore | undefined;
 
 /** Abre (e, na primeira vez, cria a chave local de) checkpoints. */
@@ -315,93 +265,28 @@ async function offerPurge(entries: CheckpointEntry[]): Promise<void> {
  * identificáveis e exporta. Usada pela nova análise (opção 6) e pela retomada (opção 7).
  */
 async function runTree(page: Page, limits: TreeLimits, session: CheckpointSession, resume?: { from: CheckpointFolder[]; mode: ResumeMode }): Promise<void> {
-  const startedAt = new Date().toISOString();
-  const nav = createAirTreeNavigator(page, operator, { timeoutMs: PAGE_TIMEOUT_MS, pollMs: POLL_MS, readTimeoutMs: PAGE_TIMEOUT_MS });
-  let checkpointFailures = 0;
   const modeLabel = resume ? ` · retomada ${MODE_LABEL[resume.mode]}` : ' · nova execução';
   console.log(`\n[${STATUS_LABEL.running}] execução ${session.runId}${modeLabel}; limites: ${describeLimits(limits)}`);
-  let result: TreeResult;
-  try {
-    result = await scanTree(nav, limits, {
-      onEvent: (e) => console.log(formatTreeEvent(e)),
-      checkpoint: {
-        pseudonymize: (await checkpointStore()).pseudonymize,
-        resume, // atribuição direta: o tsc confere o nome da opção (um spread condicional não confere)
-        // Falha ao gravar não interrompe a leitura (o arquivo anterior continua íntegro), mas é avisada.
-        save: async (snapshot) => {
-          try {
-            await session.save(snapshot);
-          } catch (error) {
-            if (checkpointFailures++ === 0) console.log(`  ! checkpoint não gravado (${error instanceof Error ? error.name : 'Error'}); a retomada pode repetir trabalho.`);
-          }
-        },
-      },
-    });
-  } finally {
-    await session.release();
-  }
-  const finishedAt = new Date().toISOString();
+  const store = await checkpointStore();
+  const run = await runTreeScan({
+    page,
+    operator,
+    limits,
+    session,
+    pseudonymize: store.pseudonymize,
+    ...(resume ? { resume } : {}),
+    config: CONFIG,
+    onEvent: (e) => console.log(formatTreeEvent(e)),
+    onCheckpointFailure: (name) => console.log(`  ! checkpoint não gravado (${name}); a retomada pode repetir trabalho.`),
+  });
+  console.log(`\nResultado: ${STATUS_LABEL[run.result.status]}`);
+  for (const line of treeSummaryLines(run.result, limits, run.checkpointFailures, 'a opção 7')) console.log(line);
 
-  const t = result.totals;
-  console.log(`\nResultado: ${STATUS_LABEL[result.status]}`);
-  console.log(`  Pastas analisadas: ${t.foldersRead}; com pendência na subárvore: ${t.foldersPending}`);
-  console.log(`  Itens: ${t.items} (pastas ${t.folders}, arquivos ${t.files}, desconhecidos ${t.unknown}); páginas lidas: ${t.pagesRead}`);
-  console.log(`  Limites utilizados: ${describeLimits(limits)}`);
-  if (result.limitsReached.length) console.log(`  Limites atingidos: ${result.limitsReached.join(', ')}`);
-  const pendingReasons = [...new Set(result.folders.flatMap((f) => f.reasons))];
-  if (pendingReasons.length) console.log(`  Pendências: ${pendingReasons.join(', ')}`);
-  if (result.resume) {
-    const r = result.resume;
-    console.log(`  Modo de retomada: ${MODE_LABEL[r.mode]}`);
-    console.log(`  Comparação com o checkpoint (pastas relidas agora): ${r.unchanged} inalterada(s), ${r.changed} alterada(s), ${r.new} nova(s), ${r.removed} removida(s)`);
-    if (r.reusedFolders > 0) {
-      console.log(`  Reaproveitadas SEM revalidar o conteúdo: ${r.reusedFolders} pasta(s), observadas a partir de ${r.oldestReusedObservation ?? '?'}.`);
-      console.log('    (só a linha delas no pai foi conferida; mudanças DENTRO delas desde então não são detectadas)');
-    }
-  }
-  const nv = result.navigation;
-  console.log(`  Diagnósticos de navegação: content-changed ${nv.contentChanged} · identity-mismatch ${nv.identityMismatch} · navigation-failed ${nv.navigationFailed}`);
-  if (nv.contentChanged > 0) {
-    console.log('    content-changed: ao voltar, a identidade da pasta foi confirmada, mas o total ou a listagem divergiu do lido antes.');
-    console.log('    É uma divergência OBSERVADA, não a sua causa. A pasta e os ancestrais não ficam completos; subpastas ainda não abertas ficaram pendentes.');
-  }
-  // Nunca apresentar o modo rápido como equivalente ao verificado.
-  console.log(
-    result.verification.eligibleForPlanning
-      ? '  Verificação: todo o conteúdo contado foi lido nesta sessão; resultado completo, utilizável como base para planejamento (POC-02).'
-      : result.verification.contentRevalidated
-        ? '  Verificação: conteúdo lido nesta sessão, mas o resultado não está completo; NÃO serve como base para planejamento.'
-        : '  Verificação: NÃO REVALIDADO. Há pastas reaproveitadas sem releitura; NÃO usar como inventário atualizado e verificado para planejar movimentações. Use a retomada VERIFICADA.',
-  );
-  console.log('  (Nenhum modo garante consistência transacional: o AIR pode ter mudado durante a própria leitura.)');
-  if (result.abort) {
-    console.log(`  !! Interrompida em ${result.abort.atRef} (${result.abort.reason}). Nenhum clique foi feito depois disso.`);
-    const d = result.abort.diagnostic;
-    if (d) {
-      const c = d.checks;
-      const conds = c?.conditions ? Object.entries(c.conditions).map(([k, v]) => `${k}=${v ? 'sim' : 'NÃO'}`).join(', ') : 'nenhuma leitura completa';
-      const fails = c ? Object.entries(c.readFailures).map(([k, n]) => `${k}×${n}`).join(', ') || 'nenhuma' : '-';
-      console.log(`     Verificação que falhou: ${d.category ?? 'navigation-failed'} / ${d.code}${c ? `; ${c.observations} leitura(s); condições na última: ${conds}; leituras com falha: ${fails}; instável: ${c.unstable}` : ''}`);
-    }
-    console.log('     Verifique no Chrome qual pasta está exibida antes de continuar.');
-  }
-  console.log(
-    checkpointFailures > 0
-      ? `  Checkpoint: ${checkpointFailures} gravação(ões) falharam; o arquivo guarda o último estado gravado com sucesso.`
-      : result.status === 'complete'
-        ? '  Checkpoint: execução concluída; não será oferecida para retomada.'
-        : '  Checkpoint gravado: a opção 7 retoma esta execução a partir da mesma pasta inicial.',
-  );
-
-  const meta = { runId: newRunId(new Date(startedAt)), checkpointRunId: session.runId, startedAt, finishedAt, environment: await detectEnvironment(page, operator) };
   console.log('\nO inventário detalhado contém nomes, caminhos e URLs (dados possivelmente pessoais/sensíveis).');
-  if (result.resume) console.log('Pastas reaproveitadas do checkpoint aparecem nele só com contagens (o checkpoint não guarda nomes).');
+  if (run.result.resume) console.log('Pastas reaproveitadas do checkpoint aparecem nele só com contagens (o checkpoint não guarda nomes).');
   const detailed = await confirm('Exportar também o inventário detalhado? Somente se permitido pelas políticas da empresa.');
-  // Selo local (§8.5) com a mesma chave que o CheckpointStore carregou para esta execução:
-  // a exportação não relê nem recria a chave do disco (se ela sumiu no meio, nada é criado).
-  const authenticator = detailed ? (await checkpointStore()).inventoryAuthenticator : undefined;
-  for (const file of await exportTreeResult(result, meta, { detailed, authenticator })) console.log(`  Gravado: ${displayPath(file)}`);
-  if (authenticator) console.log('  Inventário detalhado selado com a chave local (HMAC-SHA256). O selo prova só que o arquivo não mudou; não autoriza movimentação.');
+  for (const file of await exportTreeRun(run, store, { detailed })) console.log(`  Gravado: ${displayPath(file)}`);
+  if (detailed) console.log('  Inventário detalhado selado com a chave local (HMAC-SHA256). O selo prova só que o arquivo não mudou; não autoriza movimentação.');
 }
 
 /**
@@ -458,16 +343,16 @@ async function resumeTree(): Promise<void> {
     console.log('Origem ou URL da pasta não identificadas; retomada recusada.');
     return;
   }
-  const matching = valid.filter((e) => !compareCheckpointScope(e.checkpoint!.scope, scope));
+  const { matching, mismatched } = matchResumableRuns(entries, scope);
   if (matching.length === 0) {
     console.log('\nNenhuma execução gravada corresponde à instância, cliente, setor e pasta exibidos:');
-    for (const e of valid) console.log(`  ${e.runId}: ${compareCheckpointScope(e.checkpoint!.scope, scope)!.message}`);
+    for (const m of mismatched) console.log(`  ${m.runId}: ${m.message}`);
     return;
   }
   console.log('\nExecuções que podem ser retomadas a partir desta pasta:');
   for (const [i, e] of matching.entries()) {
     const cp = e.checkpoint!;
-    const pending = cp.folders.filter((f) => f.reasons.length > 0 || !f.settled).length;
+    const pending = pendingFolders(cp);
     const state = cp.state === 'running' ? 'interrompida' : STATUS_LABEL[cp.state].toLowerCase();
     console.log(`  ${i + 1}. ${cp.runId} · atualizada em ${cp.updatedAt} · ${state} · ${cp.totals.foldersRead} pasta(s), ${cp.totals.items} itens, ${cp.totals.pagesRead} página(s) · pendências ${pending}`);
     console.log(`     limites anteriores: ${describeLimits(cp.limits)}${cp.limitsReached.length ? ` (atingidos: ${cp.limitsReached.join(', ')})` : ''}`);
@@ -504,29 +389,7 @@ Modo de retomada:
 
 /* ───────────── Diagnóstico estrutural (POC-02A) e integridade (POC-02B.1) ───────────── */
 
-const INVENTORY_MAX_AGE_DAYS = Number(process.env.AIR_ORGANIZER_INVENTORY_MAX_AGE_DAYS ?? 7);
-
-const ELIGIBILITY_LABEL = {
-  'planning-eligible': 'ELEGÍVEL para planejamento: selo autenticado, leitura completa, revalidada, sem divergência e recente. Não autoriza movimentação; os achados continuam exigindo revisão humana.',
-  exploratory: 'EXPLORATÓRIO: os achados servem para exploração e NÃO podem fundamentar planos operacionais.',
-  rejected: 'RECUSADO: inventário inconsistente, adulterado ou ilegível; nenhum achado foi produzido.',
-} as const;
-
-const KEY_UNAVAILABLE_LABEL: Record<KeyUnavailable, string> = {
-  missing: 'chave local ausente',
-  invalid: 'chave local inválida ou em local não permitido',
-  unreadable: 'chave local ilegível',
-};
-
-function integrityLabel(report: Pick<StructuralReport, 'integrity'>, key: KeyUnavailable | undefined): string {
-  const i = report.integrity;
-  if (i.status === 'authenticated') return 'AUTENTICADA: gravado por esta instalação e inalterado desde então (não quer dizer que o AIR ainda esteja igual).';
-  if (i.status === 'unsigned') return `${UNSIGNED_INVENTORY_MESSAGE} Utilizável só para exploração.`;
-  if (i.status === 'unverifiable') return `NÃO VERIFICÁVEL (${key ? KEY_UNAVAILABLE_LABEL[key] : 'chave local indisponível'}): utilizável só para exploração.`;
-  return 'INVÁLIDA: selo não confere; o inventário é recusado.';
-}
-
-const COMPLETENESS_LABEL = { complete: 'COMPLETA', partial: 'PARCIAL', failed: 'INTERROMPIDA' } as const;
+const INVENTORY_MAX_AGE_DAYS = CONFIG.inventoryMaxAgeDays;
 
 /**
  * Analisa um inventário recursivo já exportado (tree-inventory.json). Sem navegador e sem acesso
@@ -543,14 +406,8 @@ async function structuralDiagnostics(): Promise<void> {
   const entry = inventories[Number(await ask('Número do inventário: ')) - 1];
   if (!entry) return;
 
-  // Verificação nunca cria a chave local: sem ela, os selos ficam não verificáveis.
-  const key = await openVerifyingAuthenticator(CHECKPOINT_LOCATIONS.keyFile);
-  const report = analyzeStructure(await readInventory(entry.file), {
-    now: new Date(),
-    maxAgeDays: INVENTORY_MAX_AGE_DAYS,
-    ...('authenticator' in key ? { authenticator: key.authenticator } : {}),
-  });
-  console.log(`\nIntegridade:   ${integrityLabel(report, 'unavailable' in key ? key.unavailable : undefined)}`);
+  const { report, keyUnavailable } = await diagnoseInventory(entry.file, { keyFile: CHECKPOINT_LOCATIONS.keyFile, maxAgeDays: INVENTORY_MAX_AGE_DAYS });
+  console.log(`\nIntegridade:   ${integrityLabel(report, keyUnavailable)}`);
   if (report.completeness) {
     const k = report.completeness;
     const revalidated = k.contentRevalidated === undefined ? 'revalidação não informada (formato antigo)' : k.contentRevalidated ? 'conteúdo lido na sessão' : 'conteúdo NÃO revalidado';
@@ -602,15 +459,9 @@ async function organizationPlanning(): Promise<void> {
   const entry = inventories[Number(await ask('Número do inventário: ')) - 1];
   if (!entry) return;
 
-  // Verificação nunca cria a chave local: sem ela, o selo não é verificável e o plano é recusado.
-  const key = await openVerifyingAuthenticator(CHECKPOINT_LOCATIONS.keyFile);
-  const plan = planOrganization(await readInventory(entry.file), {
-    now: new Date(),
-    maxAgeDays: INVENTORY_MAX_AGE_DAYS,
-    ...('authenticator' in key ? { authenticator: key.authenticator } : {}),
-  });
+  const { plan, keyUnavailable } = await planInventory(entry.file, { keyFile: CHECKPOINT_LOCATIONS.keyFile, maxAgeDays: INVENTORY_MAX_AGE_DAYS });
   const v = plan.validation;
-  console.log(`\nIntegridade:   ${integrityLabel(v, 'unavailable' in key ? key.unavailable : undefined)}`);
+  console.log(`\nIntegridade:   ${integrityLabel(v, keyUnavailable)}`);
   if (v.completeness) console.log(`Completude:    ${COMPLETENESS_LABEL[v.completeness.status]}${v.completeness.resumeMode ? ` · retomada ${MODE_LABEL[v.completeness.resumeMode]}` : ''}`);
   if (v.status === 'refused') {
     console.log('Planejamento:  RECUSADO. Só inventário autenticado, completo, revalidado e recente gera propostas; nenhuma proposta foi gerada.');

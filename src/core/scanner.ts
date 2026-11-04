@@ -37,6 +37,8 @@ export type ScanOptions = {
   readTimeoutMs: number;
   now?: () => string;
   trustedIdAttribute?: string;
+  /** Parada controlada: vale entre páginas. A página corrente é lida inteira; o resto fica como não lido. */
+  signal?: AbortSignal;
 };
 
 /** Assinatura do conteúdo exibido. Inclui todas as células para não depender só do nome. */
@@ -199,6 +201,17 @@ export async function scanListing(source: ListingSource, options: ScanOptions): 
         issues.push({ kind: 'max-items-reached', pageNumber, message: `Limite de ${options.maxItems} itens atingido.` });
         stopReason = 'max-items';
       }
+      break;
+    }
+
+    if (options.signal?.aborted) {
+      // Parar exatamente na última página não é cobertura parcial.
+      if (source.hasNext && !(await source.hasNext())) {
+        stopReason = 'last-page';
+        break;
+      }
+      issues.push({ kind: 'stopped', pageNumber, message: 'Parada pedida pelo operador antes do fim da listagem.' });
+      stopReason = 'stopped';
       break;
     }
 

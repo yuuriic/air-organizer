@@ -93,7 +93,9 @@ export type ScanIssueKind =
   | 'count-mismatch'
   | 'filter-active'
   /** A página ativa no paginador não é a página que o scanner esperava ler. */
-  | 'page-mismatch';
+  | 'page-mismatch'
+  /** Parada pedida pelo operador antes do fim da listagem: há páginas não lidas. */
+  | 'stopped';
 
 export type ScanIssue = {
   kind: ScanIssueKind;
@@ -112,7 +114,7 @@ export type CoverageReport = {
   /** Páginas que se sabe existirem e não foram lidas (quando estimável). */
   unreadPages: number[];
   complete: boolean;
-  stopReason: 'last-page' | 'error' | 'loop' | 'timeout' | 'max-pages' | 'max-items' | 'scope-changed';
+  stopReason: 'last-page' | 'error' | 'loop' | 'timeout' | 'max-pages' | 'max-items' | 'scope-changed' | 'stopped';
   issues: ScanIssue[];
 };
 
@@ -241,6 +243,8 @@ export type TreeResult = {
   limits: TreeLimits;
   /** Interrupção da execução inteira (navegação incerta): nenhum clique depois disso. */
   abort?: { reason: 'navigation-lost' | 'return-failed'; atRef: string; message: string; diagnostic?: NavigationDiagnostic };
+  /** Parada controlada pedida pelo operador deixou algo sem ler (sem clique pendente nem navegação incerta). */
+  stopped?: true;
   limitsReached: Array<'max-depth' | 'max-folders' | 'max-items' | 'max-pages'>;
   folders: FolderNode[];
   totals: TreeTotals;
