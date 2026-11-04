@@ -47,6 +47,7 @@ Nas leituras somente leitura das POC-01A a 01D, a listagem de pastas expôs:
 - Breadcrumb ausente na raiz, `raiz / atual` no 2º nível e intermediários colapsados num menu "More" do 3º nível em diante.
 - Filtro de tipo ("Todos" | "Arquivos" | "Pastas") e busca acima da tabela.
 - Nomes que diferem só por caixa, acento ou pontuação, um padrão que motiva a análise de duplicidades. Exemplos **fictícios** desse padrão: `PLANETAS`/`Planetas`, `ORBITAS`/`ÓRBITAS`. Um par como `Catalogo`/`Catalogo-2031` exige avaliação semântica; não é duplicidade automática.
+- Confirmado na operação: o AIR permite pastas cujos nomes diferem só por caixa ou acento, inclusive em níveis diferentes da hierarquia. Nomes e caminhos não bastam como identificadores técnicos.
 
 **Não verificado ainda:** identificadores estáveis dos itens, comportamento do modal de destino, conclusão assíncrona de movimentos, persistência de seleção e cobertura de setores inteiros. Ver também README, "Limitações conhecidas".
 
@@ -130,13 +131,14 @@ air-organizer/
 │   │   ├── records.ts         # parsing das linhas e classificação de tipo
 │   │   ├── structural-diagnostics.ts # diagnóstico estrutural determinístico (POC-02A)
 │   │   ├── inventory-integrity.ts # selo HMAC do tree-inventory.json: selar e verificar (POC-02B.1)
+│   │   ├── organization-planner.ts # propostas de revisão determinísticas, não executáveis (POC-02B.2)
 │   │   └── duplicates.ts      # normalização e suspeitas de duplicidade
 │   ├── safety/
 │   │   └── scope-validator.ts # ações permitidas, escopo, URLs, caminhos de saída
 │   ├── storage/
 │   │   ├── export.ts          # relatórios diagnósticos e inventários JSON (escrita atômica)
 │   │   ├── checkpoints.ts     # checkpoints locais: chave HMAC, escrita atômica, trava, retenção
-│   │   ├── inventory-files.ts # inventários exportados e relatórios estruturais em output/
+│   │   ├── inventory-files.ts # inventários exportados, relatórios estruturais e planos em output/
 │   │   └── integrity-key.ts   # subchave HKDF dos selos, derivada da chave local (POC-02B.1)
 │   ├── cli/
 │   │   ├── index.ts           # menu interativo
@@ -329,9 +331,39 @@ A leitura recursiva (`core/tree-scanner.ts`) é uma **DFS** sobre a interface `T
 
 1. Ler todas as páginas da pasta exibida (dentro de `maxPagesPerFolder` e do saldo de `maxItems`).
 2. Para cada subpasta elegível, na ordem exibida: reposicionar o pai na página da subpasta (clique no número da página, com conteúdo idêntico ao lido), abrir por clique, confirmar a identidade, ler recursivamente e **voltar ao pai imediato**, confirmando o retorno.
-3. Não abrir: arquivos, itens de tipo desconhecido, homônimos (após normalização), itens com "Caminho" de outro ramo, nem nada além de `maxDepth` e `maxFolders`.
+3. Não abrir: arquivos, itens de tipo desconhecido, **homônimos exatos** (subpastas irmãs com o mesmo nome lido), itens com "Caminho" de outro ramo, nem nada além de `maxDepth` e `maxFolders`. Nomes que diferem só por caixa, acento ou pontuação **não** são ambíguos e são abertos: título, breadcrumb e "Caminho" da pasta aberta são comparados exatamente com a linha clicada (§7.5.1).
 4. Recusa **antes** do clique registra a pendência e segue com as irmãs. Falha **depois** de um clique (`navigation-lost`, `return-failed`) interrompe a execução inteira, sem novos cliques, e marca o restante como `run-aborted`.
 5. Cada pasta tem `status` (filhos diretos) e `subtreeStatus` (ela e todos os descendentes). A execução só é `complete` se a pasta inicial tiver `subtreeStatus = complete`. Ciclos e visitas repetidas são detectados pela chave da pasta na execução.
+
+#### 7.5.1 Homônimos exatos
+
+**Causa da recusa.** Antes do clique, nada na linha distingue duas irmãs com o mesmo nome. Não há ID verificado nas linhas (§2.1). Depois do clique, título, breadcrumb e "Caminho" são iguais para as duas. Só a **URL** da pasta aberta (`/air/my-air/<id>`, observada na POC-01C) as diferencia.
+
+**Modo `homonyms: 'identify-by-url'`** (implementado e testado só em simulação e fixture; **desligado por padrão e não habilitado na CLI**):
+
+- A linha (página + índice) é só **localizador temporário**. Antes do clique: página reposicionada idêntica à lida (assinatura), nome, tipo e célula conferidos, e a página precisa ter **exatamente** as linhas com esse nome lidas antes (`expectedSameNameRows`). Sem essa contagem, por exemplo na opção 3, qualquer homônimo é recusado.
+- Depois do clique: identidade como em qualquer subpasta (URL nova, título, breadcrumb, "Caminho"). A **identidade persistente é a URL**: duas linhas que levam à mesma pasta geram a pendência `homonym`, e o inventário fica parcial. O grupo só fica completo se cada linha levar a uma pasta diferente, todas filhas do mesmo pai com o mesmo nome.
+- Volta ao pai, `content-changed` e mudança de ordem antes do clique continuam valendo.
+- Na retomada, o registro do checkpoint de um homônimo só é associado **depois** do clique, pela URL. A retomada RÁPIDA nunca reaproveita homônimos.
+- Homônimos com linhas **idênticas** em páginas diferentes continuam recusados: são indistinguíveis de uma repetição da paginação (`read-incomplete`).
+
+**Decisão: modo desativado, sem investigação adicional nesta fase.** A sonda experimental no AIR real não encontrou um par de homônimos exatos compatível, então a estabilidade da URL como identidade da pasta segue **sem comprovação**. Sem ela, se o AIR abrisse a irmã errada, uma URL instável esconderia o erro. Habilitar o modo na CLI exigiria nova evidência e nova decisão; até lá, vale o bloqueio conservador.
+
+#### 7.5.2 Identidade x caminho da pasta exibida
+
+Três informações distintas, nunca tratadas como equivalentes:
+
+1. **Identidade da pasta exibida:** URL identificada e título "Nome (N)" igual ao último item do breadcrumb. Na navegação, também a verificação do clique ou da volta. Não depende da coluna "Caminho".
+2. **Caminho da pasta exibida** (`FolderContext.path`, com a origem em `pathEvidence`):
+   - `uniform`: todas as linhas com o mesmo "Caminho";
+   - `expected`: conhecido por navegação verificada, ou seja, o pai na abertura e a própria pasta na volta;
+   - `breadcrumb`: cadeia do breadcrumb não colapsado ou, na raiz, o título;
+   - `inferred`: só para a pasta exibida **sem caminho esperado e com breadcrumb colapsado**, isto é, a pasta inicial do 3º nível em diante. É o **único** valor de "Caminho" das linhas, não vazio e bem formado, cujo último segmento é **igual** ao título e que é compatível com o breadcrumb (mesma raiz, mesma pasta atual, pelo menos um nível oculto). Zero ou vários candidatos dão `path-divergent` (recusa). Não há escolha por maioria, posição, ordem nem URL.
+3. **"Caminho" de cada linha:** pode apontar para outro ramo. Essas linhas são contadas em `pathAnomalies`, **nunca são abertas** (`location-mismatch`) e deixam a pasta parcial.
+
+O caminho `inferred` **não é prova de identidade**. Na abertura de uma subpasta dele, o "Caminho" precisa conferir, mas não entra nas evidências mínimas: URL, título e breadcrumb têm de bastar. Na retomada, a pasta inicial precisa ter o mesmo caminho inferido. Se ele mudar ou ficar ambíguo, a retomada é recusada antes de qualquer clique.
+
+**Dívida técnica:** um caminho `uniform` é aceito sem conferir a coerência com título e breadcrumb. Isso foi mantido para não criar recusas sem evidência. Se a página 1 de uma pasta só tiver linhas de outro ramo com o mesmo "Caminho", esse valor seria tomado como o caminho da pasta.
 
 **Por que DFS e não BFS:** na DFS o caminho de navegação é a própria pilha. Cada pasta é aberta uma vez e cada volta vai para o pai imediato, então o histórico do navegador fica coerente com a pilha, o que é necessário porque, do 3º nível em diante, a volta usa o "voltar" do cabeçalho do AIR. Uma BFS exigiria saltos entre ramos, ou seja, URLs construídas ou longas sequências de cliques, o que §7.6 proíbe.
 
@@ -498,11 +530,58 @@ Regras:
 4. Pasta de destino deve ser explicitamente escolhida e reconfirmada.
 5. Não misturar movimentações de setores diferentes.
 6. Não criar pastas implicitamente.
-7. Se destino já contém homônimo, interromper e exigir plano de conflito.
+7. Se destino já contém homônimo, interromper e exigir plano de conflito (subpastas correspondentes: ver §9.2).
 8. Não produzir plano executável quando a identidade de origem/destino for ambígua.
 9. Plano deve ser revisável sem efetuar qualquer escrita.
 
 **Dry-run é o comportamento padrão**, inclusive quando o usuário solicita um plano.
+
+> As regras acima e a `MoveOperation` valem para a POC-03. A POC-02B.2 (§9.1) **não** gera operações.
+
+### 9.1 Motor de planejamento determinístico (POC-02B.2, implementado)
+
+`core/organization-planner.ts`, motor puro (sem navegador, rede, processos nem sistema de arquivos), opção 9 da CLI. Transforma um `tree-inventory.json` **autenticado e elegível** em **propostas de revisão** para uma pessoa avaliar. Nenhuma proposta é executável, e nenhuma autoriza mover, excluir, mesclar ou renomear nada no AIR.
+
+**Revalidação na geração.** O plano não confia em relatório nem em flag gravados. Na hora da geração ele (1) roda `analyzeStructure` de novo, o que confere estrutura, selo (§8.5) e idade, e (2) aplica uma checagem própria da completude a partir das **pastas** (`planningBasisProblems`): status geral e de cada pasta/subárvore `complete`, nenhuma reaproveitada, sem pendências, sem `content-changed`, sem `abort`, sem limite atingido, retomada só VERIFICADA. Qualquer dúvida = **plano recusado, sem propostas**: sem selo, não verificável, selo inválido, FAST, parcial, expirado ou inconsistente. A exploração continua na opção 8.
+
+**Consequência importante:** irmãs que diferem só por caixa, acento ou pontuação são lidas (§7.5.1) e podem gerar propostas de "nomes equivalentes". Irmãs com nome **exatamente** igual não são abertas na configuração da CLI: o inventário fica parcial e o plano é recusado, enquanto o modo `identify-by-url` estiver desativado (§7.5.1, §15).
+
+**Proposta** (`PlanProposal`), em quatro partes separadas:
+
+| Parte | Conteúdo |
+|---|---|
+| `observed` | diagnóstico observado: achados (`findingIds`, `rules`), certeza da detecção, medidas, pastas F*n* com contagens |
+| `proposal` | proposta de revisão: resumo, justificativa e perguntas ao revisor (sem nomes) |
+| `futureAction` | possível ação futura, só com evidência suficiente: `consolidation-review` ou `name-standardization-review`, sempre `executable: false`, `authorizesChanges: false`, com pré-condições e **sem origem nem destino** |
+| `blockers` / `risks` | impedimentos e riscos |
+
+Mais: `id` estável (`P-` + SHA-256 de versão, **identidade do inventário autenticado**, tipo e achados; não depende de `now`), `status: pending-review` e `confidence` (`high`/`medium`/`low` com o critério em `basis`). `confidence` mede só a **força da evidência estrutural**: não é probabilidade, não diz que há um problema e nunca autoriza nada. A identidade do inventário (`source.inventoryId`) é um hash, com separação de domínio, do código do selo: liga o plano ao arquivo autenticado sem expor o código.
+
+**Regras** (uma proposta por achado do §8.4):
+
+| Achado | Proposta | Possível ação futura |
+|---|---|---|
+| `DUP-SIBLING-*` | `review-equivalent-names` | `consolidation-review` só com todas as irmãs lidas, listagem do pai completa e setor identificado; a pasta principal é escolha explícita do revisor |
+| `NAME-VARIANTS` | `review-standardization` se uma grafia tiver **maioria estrita**; senão `review-naming-inconsistency` | `name-standardization-review`: a grafia predominante é só **hipótese**, não regra oficial |
+| `NAME-SPACING` | `review-standardization` | `name-standardization-review` (nome sem espaços extras, como hipótese) |
+| `HIER-NESTED-SAME-NAME`, `HIER-EQUIVALENT-CHILDREN` | `review-divergent-hierarchy` | nenhuma: origem e destino não são determináveis; nada é criado, movido ou mesclado |
+
+Mesmo nome nunca é tratado como conteúdo equivalente (impedimento explícito em toda proposta de nomes equivalentes e de hierarquia). Não há proposta de exclusão, fusão automática ou movimentação entre setores: o plano cobre um inventário (um setor), e setor não identificado bloqueia toda ação futura.
+
+**Saída** (`air-organizer/organization-plan`, `schemaVersion: 1`): `executable: false`, `authorizesChanges: false`, `authenticated: false`, avisos, `source`, `validation` (integridade, completude, elegibilidade recalculada, problemas da checagem própria, motivos), `observed`, `summary` e `proposals`. **Não há** lista de operações, comandos, URLs, seletores nem destinos (testado). Gravação: `organization-plan.json` (sem nomes, caminhos, grafias nem `runId`) sempre; `organization-plan-detailed.json` (identificável) só com confirmação; os dois ao lado do inventário em `output/` (ignorado pelo Git, e também por `organization-plan*.json`). Plano recusado não é gravado.
+
+**O plano não é autenticado nesta etapa.** Um arquivo de plano pode ser editado sem detecção e **não pode** servir de fonte confiável para uma execução futura: qualquer etapa posterior deve gerar o plano de novo a partir de um inventário autenticado e recente, e revalidar no AIR.
+
+### 9.2 Regras operacionais confirmadas (orientam a POC-03; não implementadas)
+
+Confirmadas na operação. Valem para o desenho futuro: **não há** executor, comparação documental nem classificação inteligente nesta etapa. Exemplos fictícios.
+
+- O operador organiza por estrutura, nomes e contexto, **sem comparar o conteúdo interno dos arquivos**. O planejamento não deve depender dessa comparação.
+- Variações de caixa e acento (`ORBITAS`, `Orbitas`, `ÓRBITAS`) podem representar a mesma categoria, mas **exigem confirmação**.
+- Arquivos soltos vão para a pasta centralizada escolhida pelo operador. Subpastas existentes preservam sua hierarquia.
+- Quando origem e destino têm a subpasta correspondente (ex.: `2025`), a consolidação aproveita a de destino, em vez de criar outra. Isso refina a regra 7 do §9 só para esse caso; conflitos de nomes e identidades ambíguas continuam exigindo intervenção humana.
+- Um nome como `PROCESSO_00000_2031.pdf` pode gerar **sugestão** de classificação (Processo / 2031), conforme a estrutura existente. Nome de arquivo nunca prova igualdade documental (§8.2).
+- As pastas de origem permanecem: sem exclusão automática.
 
 ## 10. Executor supervisionado (somente POC-03)
 
@@ -611,6 +690,7 @@ Critérios de aceite:
 
 - Detectar nomes equivalentes por caixa, acento e pontuação (exemplos fictícios: `PLANETAS`/`Planetas`, `ORBITAS`/`ÓRBITAS`) na mesma estrutura. A normalização e as suspeitas já existem desde a POC-01.
 - **POC-02A (entregue):** motor de diagnóstico estrutural (§8.4): duplicidade entre irmãs, nomenclatura inconsistente e hierarquia divergente, com elegibilidade herdada da leitura.
+- **POC-02B.2 (entregue):** propostas de revisão determinísticas e não executáveis (§9.1). Ainda sem escolha de pasta principal nem dry-run com destinos.
 - Distinguir similaridade de nomes de duplicidade documental comprovada.
 - Exigir escolha explícita da pasta principal.
 - Impedir planos com ciclo, setor divergente ou destino ambíguo.
@@ -650,6 +730,9 @@ Critérios de aceite:
 | Nomes iguais em municípios distintos | Namespace de saída e checkpoints por instância/cliente/setor/runId |
 | Scan longo / grande volume | Checkpoint por passo e retomada por subárvore (§7.7) |
 | Pastas homônimas não mesclam | Planejamento recursivo e resolução explícita de conflitos |
+| Caminho `uniform` aceito sem conferir título e breadcrumb (dívida técnica, §7.5.2) | Mantido; avaliar com evidência do AIR real antes de exigir a coerência |
+| Irmãs com nome exatamente igual não são abertas (CLI) | Inventário com elas fica parcial e o plano é recusado (§9.1). Modo `identify-by-url` implementado, mas desativado: estabilidade da URL sem comprovação no AIR real (§7.5.1) |
+| Plano de organização editado depois de gravado | Plano não é autenticado nem executável; qualquer etapa futura gera o plano de novo a partir de inventário autenticado e recente (ADR-016) |
 | Controle de Chrome existente | Validar conexão segura e isolada; não presumir acesso automático |
 | Restrições de política da empresa | Confirmar autorização antes de automatizar produção |
 
@@ -679,14 +762,15 @@ Critérios de aceite:
 - **ADR-013 — Identidade de navegação x consistência de conteúdo (POC-01E):** na volta ao pai, identidade divergente interrompe (`identity-mismatch`); identidade confirmada com total ou listagem divergentes é aceita como `content-changed`, que invalida a completude da pasta e dos ancestrais, impede cliques a partir da listagem antiga, não gera releitura em loop, impede reaproveitamento na retomada e impede a elegibilidade para planejamento. Diagnósticos separados e sem dados identificáveis. O inventário não é uma fotografia transacional (§7.8).
 - **ADR-014 — Diagnóstico estrutural determinístico e desacoplado (POC-02A):** motor puro sobre o inventário exportado, sem navegador, rede ou banco de dados; valida a consistência antes das regras (inconsistência = recusado, sem achados); herda a elegibilidade da leitura (só `planning-eligible` fundamenta planos); regras conservadoras e nomeadas, certeza sem probabilidades, revisão humana obrigatória, sem sugestões de renomear/mover/mesclar; saída padrão redigida (§8.4).
 - **ADR-015 — Selo de integridade dos inventários (POC-02B.1):** o `tree-inventory.json` é selado na gravação com HMAC-SHA256, usando uma subchave HKDF-SHA256 derivada da chave local dos checkpoints (propósitos separados, um único segredo), sobre o JSON canônico do documento inteiro e do cabeçalho. A subchave vem da chave que o `CheckpointStore` carregou para a execução (sem reler nem recriar a chave na exportação), e o selo é calculado sobre um snapshot independente, o mesmo que é gravado. Só inventário `authenticated` pode ser `planning-eligible`; sem selo (legado ou selo removido, indistinguíveis) ou sem chave = exploratório; selo inválido = recusado. Sem selagem retroativa e sem serviços externos. Integridade autenticada não significa conteúdo atual e não autoriza movimentação (§8.5).
+- **ADR-016 — Planejamento determinístico não executável (POC-02B.2):** propostas de revisão geradas por um motor puro sobre o inventário, revalidando selo, estrutura, completude (pelas pastas) e idade no momento da geração; inelegível = recusa sem propostas. IDs incorporam a identidade do inventário autenticado. `confidence` é força de evidência, nunca autorização. Possível ação futura só como hipótese não executável, sem origem/destino; nenhum formato de comandos. O plano não é autenticado e não serve de fonte para execução sem nova leitura e revalidação (§9.1).
 
 ## 18. Próxima ação concreta
 
-**Situação:** a POC-02A está entregue (§8.4, ADR-014). O diagnóstico estrutural roda localmente sobre o `tree-inventory.json` exportado, sem navegador nem acesso ao AIR. Ele produz só achados para revisão humana e nenhum plano operacional. A POC-02B.1 está entregue (§8.5, ADR-015): os inventários são selados com HMAC local, e só inventários autenticados podem ser elegíveis.
+**Situação:** a POC-02A está entregue (§8.4, ADR-014). O diagnóstico estrutural roda localmente sobre o `tree-inventory.json` exportado, sem navegador nem acesso ao AIR. Ele produz só achados para revisão humana e nenhum plano operacional. A POC-02B.1 está entregue (§8.5, ADR-015): os inventários são selados com HMAC local, e só inventários autenticados podem ser elegíveis. A POC-02B.2 está entregue (§9.1, ADR-016): a opção 9 gera propostas de revisão determinísticas e não executáveis, só a partir de inventários autenticados, completos e recentes.
 
 Pendências da leitura (POC-01E), ainda abertas antes de abrir PR para uso operacional: (1) diagnosticar, só por leitura, o achado do `return-failed` (§7.8): `history.length` antes e depois de trocar de página numa subpasta; (2) decidir e implementar a correção da volta do 3º nível após paginação; (3) validar no AIR real a retomada VERIFICADA e a abertura de subpasta em página oculta. Depois: decidir sobre o campo "Ir".
 
-Próxima etapa, restante da POC-02B: confirmação de setor pela UI e dry-run de consolidação, fundamentados só em inventários `planning-eligible` (autenticados). Não implementar nem habilitar `mover.ts` nessas etapas.
+Próxima etapa: aplicativo base e movimentação supervisionada (POC-03), seguindo as regras do §9 e do §9.2, a partir de inventários `planning-eligible` (autenticados) e com os pré-requisitos da POC-03. `homonyms: 'identify-by-url'` continua desativado, sem nova investigação (§7.5.1). O escopo do aplicativo base ainda precisa ser decidido: o §3 lista interface própria e aplicativo desktop empacotado como fora do MVP.
 
 ---
 

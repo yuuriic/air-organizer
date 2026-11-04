@@ -19,6 +19,8 @@ export type SimBehavior = {
   redirect?: Record<string, string>;
   /** Ao voltar destes ids, o pai está com identidade confirmada mas conteúdo divergente (ADR-013). */
   changeOnBack?: Record<string, { total: boolean; listing: boolean }>;
+  /** Logo depois de ler estes ids, a ordem dos filhos é invertida (listagem muda antes do clique). */
+  reorderAfterScan?: string[];
 };
 
 export const folder = (id: string, name: string, children: SimNode[] = [], createdAt?: string): SimNode => ({
@@ -37,6 +39,8 @@ export class SimNavigator implements TreeNavigator {
   private readonly stack: SimNode[];
   private readonly byId = new Map<string, SimNode>();
   private readonly parent = new Map<string, SimNode>();
+  /** Páginas lidas por pasta (nome + data de cada linha): o "reposicionar" do adaptador real as compara. */
+  private readonly scanned = new Map<string, string[][]>();
 
   constructor(
     root: SimNode,
@@ -86,6 +90,8 @@ export class SimNavigator implements TreeNavigator {
         pageIndicator: `página ativa ${i + 1}`,
       });
     }
+    this.scanned.set(node.id, pages.map((_, i) => this.pageRows(node, i)));
+    if (this.behavior.reorderAfterScan?.includes(node.id)) node.children = [...kids].reverse();
     let position = 0;
     const source: ListingSource = {
       read: async () => pages[position]!,
@@ -101,10 +107,25 @@ export class SimNavigator implements TreeNavigator {
     return scanListing(source, { maxPages: limits.maxPages, maxItems: limits.maxItems, readTimeoutMs: 500 });
   }
 
+  private pageRows(node: SimNode, page: number): string[] {
+    const size = this.behavior.pageSize ?? 30;
+    return (node.children ?? []).slice(page * size, (page + 1) * size).map((k) => `${k.type}|${k.name}|${k.createdAt ?? ''}`);
+  }
+
+  /**
+   * Como o adaptador real: a linha (página + índice) é só um localizador temporário. Antes do
+   * clique, a página precisa ser idêntica à lida (assinatura) e a linha ter o nome esperado.
+   */
   async open(parent: FolderView, _scan: ScanResult, child: ChildRef): Promise<FolderView> {
     if (parent.key !== this.viewOf(this.top()).key) throw new Error('simulação: pai não é a pasta exibida');
-    const target = (this.top().children ?? []).find((c) => c.name === child.name);
-    if (!target || target.type !== 'folder') throw new OpenRefusedError('not-folder', `simulação: ${child.name} não é pasta`);
+    const node = this.top();
+    const page = child.sourcePage - 1;
+    if (this.scanned.get(node.id)?.[page]?.join('\n') !== this.pageRows(node, page).join('\n')) {
+      throw new OpenRefusedError('precondition', `simulação: página ${child.sourcePage} difere da lida`);
+    }
+    const target = (node.children ?? [])[page * (this.behavior.pageSize ?? 30) + child.rowIndex];
+    if (!target || target.name !== child.name) throw new OpenRefusedError('row-changed', `simulação: linha de ${child.name} mudou`);
+    if (target.type !== 'folder') throw new OpenRefusedError('not-folder', `simulação: ${child.name} não é pasta`);
     if (this.behavior.refuse?.includes(target.id)) throw new OpenRefusedError('row-changed', `linha mudou: ${child.name}`);
     this.log.push(`open:${target.id}`);
     if (this.behavior.lose?.includes(target.id)) throw new Error(`perdido ao abrir ${child.name}`);

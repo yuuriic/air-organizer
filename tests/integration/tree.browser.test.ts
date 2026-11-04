@@ -94,7 +94,7 @@ describe('leitura recursiva com o adaptador do AIR (fixture)', () => {
     await page.context().close();
   });
 
-  it('homônimos e itens de tipo desconhecido não são abertos', async () => {
+  it('homônimos exatos (política padrão) e itens de tipo desconhecido não são abertos', async () => {
     const root = dir('root', 'Setor', [dir('x1', 'Docs', files('x1', 1)), dir('x2', 'Docs'), ...files('u', 1), dir('ok', 'Ok')]);
     const page = await open(root, 'root', { pageSize: 30, fileAlt: null });
     const r = await scanTree(createAirTreeNavigator(page, {}, NAV), WIDE);
@@ -103,6 +103,36 @@ describe('leitura recursiva com o adaptador do AIR (fixture)', () => {
     expect(r.folders[0]).toMatchObject({ status: 'complete', subtreeStatus: 'partial', reasons: ['unknown-items'] });
     expect(r.status).toBe('partial');
     await page.context().close();
+  });
+
+  it('com identify-by-url, homônimos são abertos um a um e identificados pela URL', async () => {
+    const root = dir('root', 'Setor', [dir('x1', 'Docs', files('x1', 1)), dir('x2', 'Docs'), ...files('u', 1), dir('ok', 'Ok')]);
+    const page = await open(root, 'root', { pageSize: 30, fileAlt: null });
+    const r = await scanTree(createAirTreeNavigator(page, {}, NAV), WIDE, { homonyms: 'identify-by-url' });
+    expect(await read<string[]>(page, '__visits')).toEqual(['x1', 'root', 'x2', 'root', 'ok', 'root']);
+    expect(r.folders.filter((f) => f.name === 'Docs').map((f) => [f.status, f.counts.items, f.pageUrl])).toEqual([
+      ['complete', 1, `${ORIGIN}/air/my-air/x1`],
+      ['complete', 0, `${ORIGIN}/air/my-air/x2`],
+    ]);
+    expect(r.folders[0]).toMatchObject({ status: 'complete', subtreeStatus: 'partial', reasons: ['unknown-items'] });
+    expect(await read<string[]>(page, '__forbiddenClicks')).toEqual([]);
+    await page.context().close();
+  });
+
+  it('homônimos completos quando todas as identidades são verificadas; linha que abre a irmã: identidade ambígua', async () => {
+    const root = dir('root', 'Setor', [dir('x1', 'Docs', files('x1', 2)), dir('x2', 'Docs', [dir('x2a', 'Sub')]), dir('ok', 'Ok')]);
+    const page = await open(root, 'root', { pageSize: 30 });
+    const r = await scanTree(createAirTreeNavigator(page, {}, NAV), WIDE, { homonyms: 'identify-by-url' });
+    expect(r.status).toBe('complete');
+    // A volta de x2a (3º nível) usa o "voltar" do cabeçalho (histórico), que não registra visita.
+    expect(await read<string[]>(page, '__visits')).toEqual(['x1', 'root', 'x2', 'x2a', 'root', 'ok', 'root']);
+    await page.context().close();
+
+    const misrouted = await open(root, 'root', { pageSize: 30, misrouteTo: { x2: 'x1' } });
+    const m = await scanTree(createAirTreeNavigator(misrouted, {}, NAV), WIDE, { homonyms: 'identify-by-url' });
+    expect(m.status).toBe('partial');
+    expect(m.folders.filter((f) => f.name === 'Docs').map((f) => f.reasons)).toEqual([[], ['homonym']]);
+    await misrouted.context().close();
   });
 
   it('subpasta que abre a pasta errada: interrompe sem novos cliques', async () => {
@@ -161,8 +191,19 @@ describe('leitura recursiva com o adaptador do AIR (fixture)', () => {
     }
   });
 
-  it('pasta inicial no 3º nível (breadcrumb colapsado) com "Caminho" divergente: não inicia e não clica', async () => {
+  it('pasta inicial no 3º nível (breadcrumb colapsado) com "Caminho" divergente: caminho inferido, item de outro ramo não aberto', async () => {
     const root = dir('root', 'Setor', [dir('a', 'A', [dir('deep', 'Deep', [dir('x', 'X'), { ...dir('y', 'Y'), pathOverride: '/Outro' }])])]);
+    const page = await open(root, 'deep', { pageSize: 30 });
+    const r = await scanTree(createAirTreeNavigator(page, {}, NAV), WIDE);
+    expect(await read<string[]>(page, '__visits')).toEqual(['x']); // volta do 4º nível pelo "voltar" (histórico)
+    expect(page.url()).toBe(`${ORIGIN}/air/my-air/deep`);
+    expect(r.folders.find((f) => f.name === 'Y')).toMatchObject({ status: 'skipped', reasons: ['location-mismatch'] });
+    expect(r.status).toBe('partial');
+    await page.context().close();
+  });
+
+  it('pasta inicial no 3º nível com dois "Caminho" compatíveis com título e breadcrumb: não inicia e não clica', async () => {
+    const root = dir('root', 'Setor', [dir('a', 'A', [dir('deep', 'Deep', [dir('x', 'X'), { ...dir('y', 'Y'), pathOverride: '/Setor/B/Deep' }])])]);
     const page = await open(root, 'deep', { pageSize: 30 });
     await expect(scanTree(createAirTreeNavigator(page, {}, NAV), WIDE)).rejects.toThrow(/Caminho" com valores diferentes/);
     expect(await read<string[]>(page, '__visits')).toEqual([]);

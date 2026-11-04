@@ -400,7 +400,7 @@ export function analyzeStructure(input: unknown, options: AnalyzeOptions): Struc
         limitations: [
           'Nome equivalente não indica conteúdo igual; o conteúdo não foi comparado.',
           'Não indica que as pastas possam ser mescladas.',
-          ...(unopened ? ['Há pastas não abertas pela leitura (homônimos nunca são abertos): contagens desconhecidas.'] : []),
+          ...(unopened ? ['Há pastas não abertas pela leitura (homônimos exatos não são abertos na configuração padrão): contagens desconhecidas.'] : []),
           ...(parent.status === 'partial' ? ['A listagem do pai é parcial: pode haver outras irmãs equivalentes não lidas.'] : []),
         ],
         requiresHumanReview: true,

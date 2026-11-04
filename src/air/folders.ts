@@ -25,8 +25,10 @@ export type FolderContext = {
   total: number;
   /** Segmentos do breadcrumb; ausente na raiz. */
   breadcrumb?: string[];
-  /** Caminho completo confirmado da pasta, lido da coluna "Caminho"; ausente se vazia. */
+  /** Caminho completo da pasta, lido da coluna "Caminho"; ausente se vazia. Origem em `pathEvidence`. */
   path?: string;
+  /** De onde veio `path` (presente sempre que `path` estiver). */
+  pathEvidence?: PathEvidence;
   /**
    * Linhas da página exibida cujo "Caminho" difere do caminho da pasta. Observado no AIR real:
    * item listado numa pasta com localização registrada em outro ramo (não é atalho).
@@ -40,6 +42,27 @@ export type FolderContext = {
   signature: string;
   environment: AirEnvironment;
 };
+
+/**
+ * Origem do caminho da pasta exibida. Caminho é distinto da IDENTIDADE (URL, título, breadcrumb e,
+ * na navegação, a verificação do clique ou da volta) e do "Caminho" de cada linha (que pode ser de
+ * outro ramo).
+ */
+export type PathEvidence =
+  /**
+   * Todas as linhas com o mesmo "Caminho". Coerência com título e breadcrumb NÃO conferida
+   * (dívida técnica registrada; regra mantida para não criar recusas sem evidência).
+   */
+  | 'uniform'
+  /** Caminho esperado conhecido por navegação verificada (pai na abertura; a própria pasta na volta). */
+  | 'expected'
+  /** Cadeia exibida: breadcrumb não colapsado (2º nível) ou, na raiz, o próprio título. */
+  | 'breadcrumb'
+  /**
+   * Pasta exibida sem caminho esperado e com breadcrumb colapsado: o ÚNICO "Caminho" das linhas
+   * coerente com o título e o breadcrumb. Inferência: nunca conta como prova de identidade.
+   */
+  | 'inferred';
 
 /**
  * Qual verificação de identidade falhou. Código seguro para logs (sem nomes, caminhos nem URLs);
@@ -124,7 +147,11 @@ const IDENTITY_CODES: ReadonlySet<IdentityFailure> = new Set<IdentityFailure>(['
 /** Resultado de uma volta verificada. `contentChanged`: identidade confirmada, conteúdo divergente. */
 export type ReturnOutcome = { restored: FolderContext; evidence: string[]; contentChanged?: { total: boolean; listing: boolean } };
 
-export type SubfolderCandidate = { name: string; rowIndex: number; expectedPath?: string };
+/**
+ * `rowIndex` é só um localizador temporário, revalidado antes do clique (nome, tipo, célula e,
+ * na leitura recursiva, a página idêntica à lida). `expectedSameNameRows`: ver FolderOpenTarget.
+ */
+export type SubfolderCandidate = { name: string; rowIndex: number; expectedPath?: string; expectedSameNameRows?: number };
 
 export type FolderNavigationOptions = { timeoutMs: number; pollMs: number };
 
@@ -138,10 +165,29 @@ function uniformPath(rows: ReadonlyArray<{ cells: Record<string, string> }>): st
 }
 
 /**
+ * Valores de "Caminho" das linhas que podem ser o caminho da própria pasta exibida, quando ela
+ * não tem caminho esperado e o breadcrumb está colapsado: não vazio, bem formado, último segmento
+ * IGUAL ao título confirmado e compatível com o breadcrumb (mesma raiz, mesma pasta atual, ao
+ * menos um nível oculto). Sem maioria, posição, ordem nem URL. Distintos e ordenados.
+ */
+export function pathCandidates(rowPaths: readonly string[], title: string, breadcrumb: readonly string[]): string[] {
+  return [...new Set(rowPaths)]
+    .filter((p) => {
+      const segments = p.split('/').slice(1);
+      return p.startsWith('/') && segments.length > 0 && segments.every(Boolean) && segments.at(-1) === title && breadcrumbMatches(breadcrumb, segments);
+    })
+    .sort();
+}
+
+/**
  * Lê a identidade da pasta exibida. Sem título "Nome (N)" ou URL, falha fechada.
- * "Caminho" divergente entre linhas só é aceito com um caminho esperado — `expectedPath`
- * (conhecido pelo pai) ou a cadeia do breadcrumb não colapsado — e ao menos uma linha
- * igual a ele; as demais são contadas em `pathAnomalies`. Sem isso, exige unanimidade.
+ * IDENTIDADE (URL, título = último item do breadcrumb) e CAMINHO são verificações distintas.
+ * "Caminho" divergente entre linhas só é aceito com um caminho conhecido — `expectedPath`
+ * (navegação verificada), a cadeia do breadcrumb não colapsado ou, na raiz, o título — ou, sem
+ * nenhum deles (pasta inicial com breadcrumb colapsado), com EXATAMENTE um candidato coerente com
+ * título e breadcrumb (`pathCandidates`, caminho 'inferred'); zero ou vários = `path-divergent`.
+ * O caminho escolhido precisa aparecer em ao menos uma linha; as demais são contadas em
+ * `pathAnomalies` (itens de outro ramo, nunca abertos).
  */
 export async function readFolderContext(page: Page, expectedPath?: string): Promise<FolderContext> {
   const [environment, listing] = [await detectEnvironment(page, {}), await extractListing(page)];
@@ -153,25 +199,38 @@ export async function readFolderContext(page: Page, expectedPath?: string): Prom
     throw new FolderIdentityError('Pasta atual não confirmada: título e breadcrumb divergem ou estão ausentes.', 'heading-breadcrumb-mismatch');
   }
   let path = uniformPath(listing.rows);
+  let pathEvidence: PathEvidence | undefined = path ? 'uniform' : undefined;
   let pathAnomalies = 0;
   if (path === null) {
     const paths = listing.rows.map((r) => Object.entries(r.cells).find(([h]) => PATH_COLUMN.test(h))?.[1]?.trim() ?? '');
-    // Sem caminho do pai: a cadeia completa só é conhecida pelo breadcrumb NÃO colapsado
-    // (2º nível) ou, na raiz (sem breadcrumb), pelo próprio título.
     const crumbs = environment.breadcrumb.status === 'identified' ? environment.breadcrumb.value : undefined;
-    expectedPath ??= crumbs ? (crumbs.includes(BREADCRUMB_COLLAPSED) ? undefined : `/${crumbs.join('/')}`) : `/${listing.folderTitle}`;
-    if (expectedPath === undefined || !paths.includes(expectedPath)) {
+    let known = expectedPath;
+    let evidence: PathEvidence = 'expected';
+    if (known === undefined && (!crumbs || !crumbs.includes(BREADCRUMB_COLLAPSED))) {
+      // Cadeia completa exibida: breadcrumb NÃO colapsado (2º nível) ou, na raiz, o próprio título.
+      known = crumbs ? `/${crumbs.join('/')}` : `/${listing.folderTitle}`;
+      evidence = 'breadcrumb';
+    } else if (known === undefined) {
+      const candidates = pathCandidates(paths, listing.folderTitle, crumbs!);
+      if (candidates.length !== 1) {
+        throw new FolderIdentityError(`Coluna "Caminho" com valores diferentes entre linhas; ${candidates.length} candidato(s) coerente(s) com título e breadcrumb.`, 'path-divergent');
+      }
+      known = candidates[0]!;
+      evidence = 'inferred';
+    }
+    if (!paths.includes(known)) {
       throw new FolderIdentityError('Coluna "Caminho" com valores diferentes entre linhas da mesma pasta.', 'path-divergent');
     }
-    path = expectedPath;
-    pathAnomalies = paths.filter((p) => p !== expectedPath).length;
+    path = known;
+    pathEvidence = evidence;
+    pathAnomalies = paths.filter((p) => p !== known).length;
   }
   return {
     pageUrl: environment.pageUrl.value,
     title: listing.folderTitle,
     total: listing.reportedTotal,
     ...(environment.breadcrumb.status === 'identified' ? { breadcrumb: environment.breadcrumb.value } : {}),
-    ...(path ? { path } : {}),
+    ...(path ? { path, pathEvidence } : {}),
     ...(pathAnomalies ? { pathAnomalies } : {}),
     ...(activePageOf(listing.pageIndicator) !== undefined ? { activePage: activePageOf(listing.pageIndicator) } : {}),
     rows: listing.rows.length,
@@ -284,7 +343,9 @@ export function verifyChildIdentity(parent: FolderContext, target: SubfolderCand
   }
   if (child.path !== undefined && target.expectedPath !== undefined) {
     if (child.path !== target.expectedPath) throw new FolderIdentityError(`Caminho "${child.path}" difere do esperado "${target.expectedPath}".`, 'path-mismatch');
-    evidence.push(`caminho = ${target.expectedPath}`);
+    // Caminho esperado derivado de um caminho INFERIDO do pai: precisa conferir, mas não conta como
+    // prova independente (URL, título e breadcrumb têm de bastar sozinhos).
+    if (parent.pathEvidence !== 'inferred') evidence.push(`caminho = ${target.expectedPath}`);
   }
   // Título sozinho não basta (nomes podem se repetir em pastas diferentes).
   if (evidence.length < 3) throw new FolderIdentityError('Sem breadcrumb nem caminho para confirmar a identidade da subpasta.', 'insufficient-evidence');
@@ -321,6 +382,7 @@ export async function openSubfolder(
     cellText: ((await cell.textContent()) ?? '').replace(/\s+/g, ' ').trim(),
     kind: classifyRow(row).kind,
     sameNameRows: names.filter((n) => n === target.name).length,
+    ...(target.expectedSameNameRows !== undefined ? { expectedSameNameRows: target.expectedSameNameRows } : {}),
     interactiveInCell: await cell.locator('button, a, input, select, textarea, [role="checkbox"], [role="button"], [role="menuitem"]').count(),
   });
 

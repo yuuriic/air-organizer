@@ -52,7 +52,7 @@ describe('A. possíveis duplicidades (pastas irmãs)', () => {
     const [f] = r.findings.filter((x) => x.category === 'possible-duplicate');
     expect(f).toMatchObject({ rule: 'DUP-SIBLING-EXACT', certainty: 'exact', requiresHumanReview: true, measures: { pastas: 2, naoAbertas: 2 } });
     expect(f!.folders.map((e) => e.ref)).toEqual(['F1', 'F2', 'F3']); // pai + duas irmãs
-    expect(f!.folders.slice(1).every((e) => e.status === 'skipped' && e.counts === undefined)).toBe(true); // homônimos não são abertos
+    expect(f!.folders.slice(1).every((e) => e.status === 'skipped' && e.counts === undefined)).toBe(true); // homônimos exatos não são abertos (padrão)
     expect(f!.limitations.join(' ')).toMatch(/não indica conteúdo igual/i);
     expect(f!.limitations.join(' ')).toMatch(/não indica que as pastas possam ser mescladas/i);
     expect(JSON.stringify(f)).not.toMatch(/renome|mover|mescl[ae]r? as pastas|recomend/i);

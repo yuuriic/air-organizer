@@ -1,5 +1,6 @@
 import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
+import { redactPlan, type OrganizationPlan } from '../core/organization-planner.js';
 import { isIsoTimestamp, redactReport, type StructuralReport } from '../core/structural-diagnostics.js';
 import { SafetyViolation, assertInsideDirectory } from '../safety/scope-validator.js';
 import { DEFAULT_OUTPUT_DIR, writeAtomic } from './export.js';
@@ -95,5 +96,23 @@ export async function exportStructuralReport(
   const dir = path.dirname(assertInsideDirectory(outputDir, path.relative(path.resolve(outputDir), path.resolve(inventoryFile))));
   const written = [await writeAtomic(path.join(dir, 'structural-diagnostics.json'), redactReport(report))];
   if (options.detailed) written.push(await writeAtomic(path.join(dir, 'structural-diagnostics-detailed.json'), report));
+  return written;
+}
+
+/**
+ * Grava o plano de organização ao lado do inventário (output/, fora do Git): sempre
+ * `organization-plan.json` (sem nomes, caminhos, grafias nem runId); `organization-plan-detailed.json`
+ * (identificável) só com `detailed`. Plano recusado não é gravado: não há propostas.
+ */
+export async function exportOrganizationPlan(
+  plan: OrganizationPlan,
+  inventoryFile: string,
+  options: { detailed: boolean },
+  outputDir = DEFAULT_OUTPUT_DIR,
+): Promise<string[]> {
+  if (plan.validation.status !== 'accepted') throw new SafetyViolation('Plano recusado não é gravado.');
+  const dir = path.dirname(assertInsideDirectory(outputDir, path.relative(path.resolve(outputDir), path.resolve(inventoryFile))));
+  const written = [await writeAtomic(path.join(dir, 'organization-plan.json'), redactPlan(plan))];
+  if (options.detailed) written.push(await writeAtomic(path.join(dir, 'organization-plan-detailed.json'), plan));
   return written;
 }

@@ -52,7 +52,10 @@ export function createAirTreeNavigator(
       if (jump.status !== 'reached') {
         throw new OpenRefusedError('precondition', `Não foi possível voltar à página ${child.sourcePage} com o mesmo conteúdo lido antes: ${jump.reason}`);
       }
-      const { child: ctx } = await openSubfolder(page, contextOf(parent), child, options);
+      // Homônimos: a página reposicionada precisa ter exatamente as linhas com esse nome lidas antes.
+      // A linha (rowIndex) é só um localizador temporário; a identidade vem da URL, conferida pelo scanner.
+      const expectedSameNameRows = parentScan.items.filter((i) => i.sourcePage === child.sourcePage && i.name === child.name).length;
+      const { child: ctx } = await openSubfolder(page, contextOf(parent), { ...child, expectedSameNameRows }, options);
       return view(ctx);
     },
 

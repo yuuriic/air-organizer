@@ -41,14 +41,13 @@ describe('scanTree — percurso', () => {
 });
 
 describe('scanTree — identidade e pendências', () => {
-  it('homônimos (inclusive pasta x arquivo com nome equivalente) não são abertos e ficam pendentes', async () => {
-    const root = folder('root', 'Raiz', [folder('x1', 'Docs'), folder('x2', 'docs'), folder('y', 'Notas'), file('n', 'NOTAS'), folder('ok', 'Outra')]);
+  it('nomes que diferem por caixa ou acento (e pasta x arquivo homônimo) não são ambíguos: abertos e completos', async () => {
+    const root = folder('root', 'Raiz', [folder('x1', 'Docs'), folder('x2', 'docs'), folder('x3', 'Dócs'), folder('y', 'Notas'), file('n', 'Notas'), folder('ok', 'Outra')]);
     const nav = new SimNavigator(root);
     const r = await scanTree(nav, WIDE);
-    expect(nav.opened()).toEqual(['ok']);
-    expect(['Docs', 'docs', 'Notas'].map((n) => byRef(r, n).reasons)).toEqual([['homonym'], ['homonym'], ['homonym']]);
-    expect(r.status).toBe('partial');
-    expect(byRef(r, 'Raiz')).toMatchObject({ status: 'complete', subtreeStatus: 'partial' });
+    expect(nav.opened()).toEqual(['x1', 'x2', 'x3', 'y', 'ok']); // nunca o arquivo
+    expect(r.status).toBe('complete');
+    expect(r.folders.every((f) => f.reasons.length === 0)).toBe(true);
   });
 
   it('item de tipo desconhecido não é aberto e torna a subárvore parcial', async () => {
