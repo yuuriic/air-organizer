@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; base-uri 'none'; form-action 'none'">
+  <title>AIR Organizer</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <nav class="sidebar" aria-label="Navegação principal">
+    <div class="brand">
+      <strong>AIR Organizer</strong>
+      <span>v0.1</span>
+    </div>
+    <button class="nav" data-screen="home" aria-current="page">Início</button>
+    <button class="nav" data-screen="read">Leitura</button>
+    <button class="nav" data-screen="diagnostics">Diagnóstico</button>
+    <button class="nav" data-screen="planning">Planejamento</button>
+    <button class="nav" data-screen="settings">Configurações</button>
+    <p class="mode">Somente leitura<br>Nada é alterado no AIR</p>
+  </nav>
+
+  <main>
+    <div id="op-bar" class="op-bar" role="status" hidden>
+      <div>
+        <strong id="op-title"></strong>
+        <span id="op-progress"></span>
+      </div>
+      <div class="actions">
+        <button id="op-stop" class="primary">Interromper leitura</button>
+        <button id="op-force" hidden>Fechar Chrome à força</button>
+      </div>
+    </div>
+    <div id="message" class="message" role="alert" hidden></div>
+
+    <section id="home" class="screen">
+      <h1>Início</h1>
+      <div class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Chrome dedicado</h2>
+            <p class="status" id="chrome-state">Verificando...</p>
+          </div>
+          <div class="actions">
+            <button id="open-chrome" class="primary" disabled>Abrir Chrome dedicado</button>
+            <button id="close-chrome" disabled>Fechar Chrome dedicado</button>
+          </div>
+        </div>
+        <p class="muted">Abre um Chrome separado, com perfil próprio. O login no AIR é sempre manual, nessa janela, e nenhuma senha é guardada aqui.</p>
+      </div>
+      <div class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Conexão com o AIR</h2>
+            <p class="status" id="air-state">Não verificada</p>
+          </div>
+          <div class="actions">
+            <button id="check-connection" data-needs="chrome" disabled>Verificar conexão</button>
+          </div>
+        </div>
+        <p class="muted">Depois do login, abra a pasta desejada no Chrome dedicado e verifique. Os valores não aparecem aqui: confira no Chrome se esta é a pasta autorizada.</p>
+        <label id="tab-field" class="field" hidden>Aba do AIR <select id="tab-select"></select></label>
+        <div id="connection-result"></div>
+      </div>
+    </section>
+
+    <section id="read" class="screen" hidden>
+      <h1>Leitura</h1>
+      <div class="panel">
+        <h2>Contexto informado por você</h2>
+        <p class="muted">Cliente e setor não têm seletor validado na interface do AIR. Informe como exibido; vazio = não identificado. Fica só na memória desta sessão.</p>
+        <div class="fields">
+          <label class="field">Cliente/organização <input id="op-client" maxlength="200" autocomplete="off"></label>
+          <label class="field">Setor selecionado <input id="op-sector" maxlength="200" autocomplete="off"></label>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Pasta atual</h2>
+            <p class="muted">Lê todas as páginas da pasta exibida, sem entrar em subpastas.</p>
+          </div>
+          <div class="actions"><button id="read-folder" data-needs="chrome" disabled>Analisar pasta atual</button></div>
+        </div>
+        <div id="folder-result"></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Uma subpasta</h2>
+            <p class="muted">Abre uma subpasta da página exibida, confirma a identidade, lê e volta. Os nomes só aparecem quando você lista.</p>
+          </div>
+          <div class="actions"><button id="list-subfolders" data-needs="chrome" disabled>Listar subpastas</button></div>
+        </div>
+        <div id="subfolder-list" class="row" hidden>
+          <select id="subfolder-select" aria-label="Subpasta"></select>
+          <button id="read-subfolder" data-needs="chrome" disabled>Abrir, ler e voltar</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Árvore, a partir da pasta exibida</h2>
+        <p class="muted">Lê a pasta exibida e seus descendentes até os limites abaixo. Ao atingir um limite, a leitura para e fica parcial. Para uma leitura ampla, abra a pasta mais alta do setor e aumente os limites; eles nunca sobem sozinhos.</p>
+        <div id="tree-limits" class="fields limits"></div>
+        <div class="actions">
+          <button id="wide-limits" type="button">Preencher limites amplos</button>
+          <button id="start-tree" class="primary" data-needs="chrome" disabled>Iniciar leitura</button>
+        </div>
+        <div id="tree-result"></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Retomar leitura</h2>
+            <p class="muted">Abra no Chrome dedicado a mesma pasta inicial da execução (nenhuma URL é montada) e busque. Checkpoints expirados continuam sendo limpos só pela CLI.</p>
+          </div>
+          <div class="actions"><button id="list-resumable" data-needs="chrome" disabled>Buscar execuções</button></div>
+        </div>
+        <div id="resume-result"></div>
+      </div>
+
+      <details class="panel">
+        <summary>Registro da leitura (sem nomes)</summary>
+        <pre id="op-log" tabindex="0"></pre>
+      </details>
+    </section>
+
+    <section id="diagnostics" class="screen" hidden>
+      <h1>Diagnóstico</h1>
+      <div class="panel">
+        <p class="lead">Analisa um inventário detalhado já gravado, sem navegador e sem acessar o AIR. Mostra achados para revisão humana; não sugere mover, mesclar nem renomear.</p>
+        <div class="row">
+          <select id="diag-select" aria-label="Inventário"></select>
+          <button id="diag-refresh" type="button">Atualizar lista</button>
+          <button id="diag-run" class="primary" data-needs="idle">Diagnosticar</button>
+        </div>
+      </div>
+      <div id="diag-result"></div>
+    </section>
+
+    <section id="planning" class="screen" hidden>
+      <h1>Planejamento</h1>
+      <div class="panel">
+        <p class="lead">Gera propostas para revisão humana. Nenhuma proposta é executável, e nenhuma autoriza mover, excluir, mesclar ou renomear nada no AIR.</p>
+        <div class="row">
+          <select id="plan-select" aria-label="Inventário"></select>
+          <button id="plan-refresh" type="button">Atualizar lista</button>
+          <button id="plan-run" class="primary" data-needs="idle">Gerar propostas</button>
+        </div>
+      </div>
+      <div id="plan-result"></div>
+    </section>
+
+    <section id="settings" class="screen" hidden>
+      <h1>Configurações</h1>
+      <div class="panel">
+        <p class="muted">Gravadas no seu perfil local, sem senhas nem tokens. Campo vazio usa o padrão. Variável de ambiente definida tem precedência. A CLI continua usando só variáveis de ambiente.</p>
+        <p id="settings-problem" class="warning" hidden></p>
+        <div id="settings-fields" class="fields stacked"></div>
+        <div class="actions">
+          <button id="settings-save" class="primary" data-needs="stopped">Salvar</button>
+        </div>
+        <p class="muted">Para salvar, feche o Chrome dedicado.</p>
+      </div>
+      <div class="panel">
+        <h2>Locais usados agora</h2>
+        <dl class="paths">
+          <dt>Perfil do Chrome dedicado</dt><dd id="path-profile"></dd>
+          <dt>Checkpoints</dt><dd id="path-checkpoints"></dd>
+          <dt>Inventários e relatórios</dt><dd id="path-output"></dd>
+          <dt>Arquivo de configurações</dt><dd id="path-settings"></dd>
+        </dl>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="confirm">
+    <h2 id="confirm-title"></h2>
+    <div id="confirm-body"></div>
+    <div class="actions dialog-actions">
+      <button id="confirm-no">Cancelar</button>
+      <button id="confirm-yes" class="primary"></button>
+    </div>
+  </dialog>
+  <script src="app.js"></script>
+</body>
+</html>
