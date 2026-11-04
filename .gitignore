@@ -8,6 +8,7 @@ checkpoints/
 inventory*.json
 tree-*.json
 structural-diagnostics*.json
+organization-plan*.json
 *.jsonl
 *.log
 

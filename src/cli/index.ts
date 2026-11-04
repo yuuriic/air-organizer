@@ -15,7 +15,8 @@ import { formatTreeEvent, scanTree } from '../core/tree-scanner.js';
 import { assertReadOnlyMode, fingerprintOf, sanitizeUrl, validateAnalysisScope } from '../safety/scope-validator.js';
 import { CheckpointStore, DEFAULT_RETENTION_DAYS, defaultCheckpointLocations, type CheckpointEntry, type CheckpointSession } from '../storage/checkpoints.js';
 import { displayPath, exportInventoryResult, exportTreeResult, newRunId } from '../storage/export.js';
-import { describeLocalFailure, exportStructuralReport, listTreeInventories, readInventory } from '../storage/inventory-files.js';
+import { describeLocalFailure, exportOrganizationPlan, exportStructuralReport, listTreeInventories, readInventory } from '../storage/inventory-files.js';
+import { formatProposal, planOrganization } from '../core/organization-planner.js';
 import { analyzeStructure, formatFinding, type StructuralReport } from '../core/structural-diagnostics.js';
 import { openVerifyingAuthenticator, type KeyUnavailable } from '../storage/integrity-key.js';
 import { UNSIGNED_INVENTORY_MESSAGE } from '../core/inventory-integrity.js';
@@ -517,7 +518,7 @@ const KEY_UNAVAILABLE_LABEL: Record<KeyUnavailable, string> = {
   unreadable: 'chave local ilegível',
 };
 
-function integrityLabel(report: StructuralReport, key: KeyUnavailable | undefined): string {
+function integrityLabel(report: Pick<StructuralReport, 'integrity'>, key: KeyUnavailable | undefined): string {
   const i = report.integrity;
   if (i.status === 'authenticated') return 'AUTENTICADA: gravado por esta instalação e inalterado desde então (não quer dizer que o AIR ainda esteja igual).';
   if (i.status === 'unsigned') return `${UNSIGNED_INVENTORY_MESSAGE} Utilizável só para exploração.`;
@@ -584,9 +585,67 @@ async function structuralDiagnostics(): Promise<void> {
   for (const file of await exportStructuralReport(report, entry.file, { detailed })) console.log(`  Gravado: ${displayPath(file)}`);
 }
 
+/* ───────────── Planejamento de organização (POC-02B.2) ───────────── */
+
+/**
+ * Gera propostas de REVISÃO a partir de um inventário exportado. Sem navegador e sem acesso ao AIR;
+ * nada é executável. Só inventário autenticado, completo e recente (revalidado agora) gera plano.
+ */
+async function organizationPlanning(): Promise<void> {
+  const inventories = await listTreeInventories();
+  if (inventories.length === 0) {
+    console.log('\nNenhum inventário detalhado (tree-inventory.json) em output/. Ele é gravado pelas opções 6/7, com confirmação.');
+    return;
+  }
+  console.log('\nInventários recursivos detalhados (planejamento local, sem navegador):');
+  for (const [i, e] of inventories.entries()) console.log(`  ${i + 1}. ${displayPath(e.file)} · ${e.status ?? '?'} · finalizado em ${e.finishedAt ?? '?'}`);
+  const entry = inventories[Number(await ask('Número do inventário: ')) - 1];
+  if (!entry) return;
+
+  // Verificação nunca cria a chave local: sem ela, o selo não é verificável e o plano é recusado.
+  const key = await openVerifyingAuthenticator(CHECKPOINT_LOCATIONS.keyFile);
+  const plan = planOrganization(await readInventory(entry.file), {
+    now: new Date(),
+    maxAgeDays: INVENTORY_MAX_AGE_DAYS,
+    ...('authenticator' in key ? { authenticator: key.authenticator } : {}),
+  });
+  const v = plan.validation;
+  console.log(`\nIntegridade:   ${integrityLabel(v, 'unavailable' in key ? key.unavailable : undefined)}`);
+  if (v.completeness) console.log(`Completude:    ${COMPLETENESS_LABEL[v.completeness.status]}${v.completeness.resumeMode ? ` · retomada ${MODE_LABEL[v.completeness.resumeMode]}` : ''}`);
+  if (v.status === 'refused') {
+    console.log('Planejamento:  RECUSADO. Só inventário autenticado, completo, revalidado e recente gera propostas; nenhuma proposta foi gerada.');
+    for (const r of v.reasons) console.log(`  Motivo: ${r}`);
+    console.log('  Para explorar os achados mesmo assim, use a opção 8. Para planejar, faça uma nova leitura (opção 6 ou retomada VERIFICADA).');
+    return;
+  }
+  const s = plan.summary;
+  console.log(`Planejamento:  ${s.proposals} proposta(s) de revisão, todas PENDENTES e NÃO EXECUTÁVEIS · ${s.withFutureAction} com hipótese futura · ${s.withBlockers} com impedimentos`);
+  console.log(
+    `  Por tipo: nomes equivalentes ${s.byKind['review-equivalent-names']} · nomenclatura ${s.byKind['review-naming-inconsistency']} · padronização ${s.byKind['review-standardization']} · hierarquia ${s.byKind['review-divergent-hierarchy']}`,
+  );
+  for (const p of plan.proposals) console.log(`    ${formatProposal(p)}`);
+  for (const n of plan.notices) console.log(`  · ${n}`);
+
+  if (plan.proposals.length > 0) {
+    console.log('\nOs nomes das pastas podem conter dados pessoais/sensíveis.');
+    if (await confirm('Exibir os nomes envolvidos neste console?')) {
+      for (const p of plan.proposals) {
+        console.log(`\n  ${p.id} ${p.kind}`);
+        for (const e of p.observed.folders) console.log(`    ${e.ref}  ${e.path ?? e.name ?? '(sem nome no inventário)'}`);
+        if (p.observed.names?.variants) console.log(`    grafias: ${p.observed.names.variants.map((x) => JSON.stringify(x)).join(' · ')}`);
+        if (p.futureAction?.hypothesisName !== undefined) console.log(`    hipótese (não oficial): ${JSON.stringify(p.futureAction.hypothesisName)}`);
+      }
+    }
+  }
+  console.log('\nO plano sem nomes é sempre gravado em output/. O detalhado contém nomes e caminhos (dados possivelmente pessoais/sensíveis).');
+  const detailed = await confirm('Gravar também o plano detalhado? Somente se permitido pelas políticas da empresa.');
+  for (const file of await exportOrganizationPlan(plan, entry.file, { detailed })) console.log(`  Gravado: ${displayPath(file)}`);
+  console.log('  O plano não é autenticado e não autoriza nenhuma alteração no AIR.');
+}
+
 function menu(resumable: number): string {
   return `
-AIR Organizer — POC-02B.1 (somente leitura)
+AIR Organizer — POC-02B.2 (somente leitura)
 
 1. Verificar conexão com AIR
 2. Analisar pasta atual
@@ -595,6 +654,7 @@ AIR Organizer — POC-02B.1 (somente leitura)
 5. Exportar inventário
 6. Analisar árvore             (recursivo controlado, com limites e checkpoint)
 ${resumable > 0 ? `7. Retomar análise de árvore  (${resumable} checkpoint(s) válido(s))\n` : ''}8. Diagnóstico estrutural     (de inventário exportado; sem navegador)
+9. Planejamento de organização (propostas de revisão; sem navegador; nada executável)
 0. Sair
 `;
 }
@@ -615,6 +675,7 @@ async function main(): Promise<void> {
       else if (option === '6') await analyzeTree();
       else if (option === '7' && resumable > 0) await resumeTree();
       else if (option === '8') await structuralDiagnostics();
+      else if (option === '9') await organizationPlanning();
       else console.log('Opção inválida.');
     } catch (error) {
       if (error instanceof InputClosed) break;
@@ -623,9 +684,9 @@ async function main(): Promise<void> {
         console.error(`\nRetomada recusada [${error.rejection.code}]: ${error.rejection.message}`);
         continue;
       }
-      // Opção 8: processamento local, sem navegador. Motivo sem caminhos nem trechos do arquivo.
-      if (option === '8') {
-        console.error(`\nDiagnóstico estrutural não concluído: ${describeLocalFailure(error)}`);
+      // Opções 8/9: processamento local, sem navegador. Motivo sem caminhos nem trechos do arquivo.
+      if (option === '8' || option === '9') {
+        console.error(`\n${option === '8' ? 'Diagnóstico estrutural' : 'Planejamento'} não concluído: ${describeLocalFailure(error)}`);
         if (VERBOSE_ERRORS) console.error(`  (${error instanceof Error ? `${error.name}: ${error.message}` : String(error)})`);
         else console.error('  Confira o inventário em output/ ou gere outro pelas opções 6/7. Para ver o texto do erro, defina AIR_ORGANIZER_VERBOSE_ERRORS=1.');
         continue;

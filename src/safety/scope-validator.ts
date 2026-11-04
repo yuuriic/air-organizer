@@ -176,6 +176,13 @@ export type FolderOpenTarget = {
   kind: 'folder' | 'file' | 'unknown';
   /** Linhas da página com o mesmo nome (homônimos impedem confirmar a identidade). */
   sameNameRows: number;
+  /**
+   * Leitura recursiva: linhas com esse nome na MESMA página, segundo a leitura do pai. Com ela,
+   * homônimos são aceitos se a página exibida tiver exatamente essa quantidade; a identidade de
+   * cada um é então confirmada DEPOIS do clique, pela URL própria da pasta (ver tree-scanner).
+   * Ausente (ex.: opção 3) = qualquer homônimo recusa.
+   */
+  expectedSameNameRows?: number;
   /** Controles interativos dentro da célula do nome (o clique deve cair só no texto). */
   interactiveInCell: number;
 };
@@ -192,8 +199,12 @@ export function assertFolderOpenTarget(target: FolderOpenTarget): void {
   if (target.rowName !== target.expectedName || target.cellText !== target.expectedName) {
     throw new OpenRefusedError('row-changed', `A linha exibida ("${target.cellText}") não é a subpasta escolhida ("${target.expectedName}").`);
   }
-  if (target.sameNameRows !== 1) {
-    throw new OpenRefusedError('homonym', `Há ${target.sameNameRows} itens chamados "${target.expectedName}" nesta página; identidade ambígua.`);
+  if (target.expectedSameNameRows === undefined || target.expectedSameNameRows <= 1) {
+    if (target.sameNameRows !== 1) {
+      throw new OpenRefusedError('homonym', `Há ${target.sameNameRows} itens chamados "${target.expectedName}" nesta página; identidade ambígua.`);
+    }
+  } else if (target.sameNameRows !== target.expectedSameNameRows) {
+    throw new OpenRefusedError('row-changed', `A página tem ${target.sameNameRows} itens chamados "${target.expectedName}"; a leitura do pai registrou ${target.expectedSameNameRows}.`);
   }
   if (target.interactiveInCell !== 0) {
     throw new OpenRefusedError('interactive-cell', 'A célula do nome contém controles interativos; clique recusado.');

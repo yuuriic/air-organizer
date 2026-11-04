@@ -1,6 +1,5 @@
 import { OpenRefusedError } from '../safety/scope-validator.js';
 import { ResumeRejectedError, idsFor, isSettledSubtree, subtreeOf, type CheckpointFolder, type Pseudonymize } from './checkpoint.js';
-import { normalizeName } from './duplicates.js';
 import type {
   AirItem,
   FolderNode,
@@ -42,7 +41,10 @@ export type FolderView = {
   path?: string;
 };
 
-/** Subpasta a abrir: posição verificada na listagem já lida do pai. */
+/**
+ * Subpasta a abrir. `sourcePage`/`rowIndex` são só localizadores temporários na listagem já lida
+ * do pai (revalidados antes do clique); a identidade persistente da pasta é a URL (`FolderView.key`).
+ */
 export type ChildRef = { name: string; sourcePage: number; rowIndex: number; expectedPath?: string };
 
 export interface TreeNavigator {
@@ -87,6 +89,16 @@ export type TreeScanOptions = {
     resume?: { from: readonly CheckpointFolder[]; mode: ResumeMode };
   };
   now?: () => string;
+  /**
+   * Subpastas irmãs com o MESMO nome lido (nada na linha as distingue antes do clique):
+   * - 'refuse' (padrão): não são abertas (pendência 'homonym'); o inventário fica parcial.
+   * - 'identify-by-url': cada uma é aberta pela sua linha e identificada depois pela URL própria.
+   *   Depende de a URL identificar a pasta de forma estável durante a execução, o que ainda NÃO foi
+   *   validado no AIR real (README, "Limitações conhecidas"); a CLI não habilita este modo.
+   * Nomes que diferem por caixa, acento ou pontuação nunca são ambíguos (título e caminho são
+   * comparados exatamente) e são abertos nos dois modos.
+   */
+  homonyms?: 'refuse' | 'identify-by-url';
 };
 
 function message(error: unknown): string {
@@ -121,6 +133,7 @@ export async function scanTree(nav: TreeNavigator, limits: TreeLimits, options: 
   const emit = options.onEvent ?? (() => {});
   const now = options.now ?? (() => new Date().toISOString());
   const checkpoint = options.checkpoint;
+  const homonymPolicy = options.homonyms ?? 'refuse';
   const ids = checkpoint ? idsFor(checkpoint.pseudonymize) : undefined;
   const previous = checkpoint?.resume?.from;
   const mode = checkpoint?.resume?.mode;
@@ -224,7 +237,7 @@ export async function scanTree(nav: TreeNavigator, limits: TreeLimits, options: 
     await checkpoint.save({ folders: snapshotFolders(), totals: totals(), limitsReached: [...limitsReached], ...(final ? { final } : {}) });
   };
 
-  /** Registro do checkpoint para a subpasta `name` de `parent`: só se for único (homônimos nunca são abertos). */
+  /** Registro do checkpoint para a subpasta `name` de `parent`: só se o nome for único (homônimos são associados depois do clique, pela URL). */
   const childRecord = (parent: CheckpointFolder | undefined, name: string): CheckpointFolder | undefined => {
     if (!parent || !previous || !ids) return undefined;
     const matches = previous.filter((f) => f.parentRef === parent.ref && f.nameId === ids.name(name));
@@ -328,16 +341,25 @@ export async function scanTree(nav: TreeNavigator, limits: TreeLimits, options: 
     progress();
     await save();
 
-    // Homônimos: qualquer outro item da pasta com o mesmo nome normalizado impede identificar a linha.
-    const nameCount = new Map<string, number>();
-    for (const item of scan.items) nameCount.set(normalizeName(item.name), (nameCount.get(normalizeName(item.name)) ?? 0) + 1);
+    // Homônimos (subpastas com o MESMO nome lido): nenhuma informação da linha as distingue antes
+    // do clique. Com 'identify-by-url', cada uma é aberta pela sua linha (localizador temporário,
+    // revalidado antes do clique) e identificada DEPOIS pela URL própria da pasta, conferida com
+    // título, breadcrumb e "Caminho". Duas aberturas na mesma URL = identidade ambígua (pendência
+    // 'homonym'): o grupo só é completo se cada linha levar a uma pasta diferente. Nomes que
+    // diferem só por caixa, acento ou pontuação não são ambíguos: título e caminho são exatos.
+    const sameName = new Map<string, number>();
+    for (const item of scan.items) if (item.kind === 'folder') sameName.set(item.name, (sameName.get(item.name) ?? 0) + 1);
     const children: Array<[AirItem, FolderNode]> = scan.items
       .filter((i) => i.kind === 'folder')
       .map((i) => [i, node(i.name, n.depth + 1, n.ref, i.observationKey)]);
     // Subpastas registradas que sumiram da listagem — só afirmável com a listagem inteira relida.
     if (record && previous && ids && n.status === 'complete') {
-      const present = new Set(children.map(([i]) => ids.name(i.name)));
-      compared.removed += previous.filter((f) => f.parentRef === record.ref && !present.has(f.nameId)).length;
+      // Por multiplicidade: um de dois homônimos removido também conta.
+      const present = new Map<string, number>();
+      for (const [i] of children) present.set(ids.name(i.name), (present.get(ids.name(i.name)) ?? 0) + 1);
+      const recorded = new Map<string, number>();
+      for (const f of previous) if (f.parentRef === record.ref) recorded.set(f.nameId, (recorded.get(f.nameId) ?? 0) + 1);
+      for (const [nameId, count] of recorded) compared.removed += Math.max(0, count - (present.get(nameId) ?? 0));
     }
 
     let stale = false;
@@ -350,7 +372,8 @@ export async function scanTree(nav: TreeNavigator, limits: TreeLimits, options: 
       if (abort) return pending(child, 'skipped', 'run-aborted');
       // ADR-013: depois de conteúdo divergente, a listagem lida não sustenta novos cliques.
       if (stale) return pending(child, 'skipped', 'content-changed');
-      if ((nameCount.get(normalizeName(item.name)) ?? 0) > 1) return pending(child, 'skipped', 'homonym');
+      const homonyms = (sameName.get(item.name) ?? 0) > 1;
+      if (homonyms && homonymPolicy !== 'identify-by-url') return pending(child, 'skipped', 'homonym');
       if (view.path !== undefined && item.path !== view.path) return pending(child, 'skipped', 'location-mismatch');
 
       // Retomada RÁPIDA: a linha relida agora precisa ser idêntica à registrada (todos os metadados).
@@ -391,13 +414,19 @@ export async function scanTree(nav: TreeNavigator, limits: TreeLimits, options: 
         return;
       }
 
+      // Homônimo: o registro do checkpoint só é associado depois do clique, pela URL.
+      if (!childRec && homonyms && record && previous && ids) {
+        const byKey = previous.filter((f) => f.parentRef === record.ref && f.nameId === ids.name(item.name) && f.keyId === ids.key(childView.key));
+        if (byKey.length === 1) childRec = byKey[0];
+      }
       // Outra URL que a registrada para este nome: o registro antigo não descreve esta pasta.
       if (childRec?.keyId && ids && childRec.keyId !== ids.key(childView.key)) childRec = undefined;
 
       if (ancestors.includes(childView.key) || childView.key === view.key) {
         pending(child, 'failed', 'cycle');
       } else if (visited.has(childView.key) || (ids && reusedKeyIds.has(ids.key(childView.key)))) {
-        pending(child, 'skipped', 'repeated-visit');
+        // Entre homônimos, outra linha que leva à mesma pasta: não dá para afirmar que todas foram lidas.
+        pending(child, 'skipped', homonyms ? 'homonym' : 'repeated-visit');
       } else {
         await visit(child, childView, [...ancestors, view.key], childRec);
       }
