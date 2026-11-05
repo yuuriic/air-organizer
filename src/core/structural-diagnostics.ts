@@ -144,7 +144,7 @@ const FOLDER_STATUSES: readonly FolderStatus[] = ['complete', 'partial', 'failed
 
 const isRead = (f: FolderNode) => f.status === 'complete' || f.status === 'partial';
 const refNumber = (ref: string) => Number(ref.slice(1));
-const byRef = (a: { ref: string }, b: { ref: string }) => refNumber(a.ref) - refNumber(b.ref);
+export const byRef = (a: { ref: string }, b: { ref: string }) => refNumber(a.ref) - refNumber(b.ref);
 const findingId = (rule: DiagnosticRule, refs: string[]) => createHash('sha256').update(`${rule}|${[...refs].sort().join(',')}`).digest('hex').slice(0, 12);
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 const isCount = (value: unknown): value is number => typeof value === 'number' && Number.isInteger(value) && value >= 0;

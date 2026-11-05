@@ -20,6 +20,13 @@ const MAIN = path.join(ROOT, 'dist', 'desktop-flow', 'fixture-main.mjs');
 const TIMEOUT = 120_000;
 /** Espera por elemento: menor que o prazo do teste, para a falha citar o elemento e o estado da tela. */
 const WAIT = 30_000;
+/**
+ * Prazo da fixture para navegar e ler (o padrão do aplicativo). Precisa ser folgado: sob carga, a
+ * navegação inicial pode demorar vários segundos, e, se o prazo estourar, a sessão abre com a aba em
+ * branco, por desenho (§5.2), e a verificação de conexão falha com "Nenhuma aba HTTP(S)". Menor que
+ * WAIT, para a falha citar o elemento e o estado da tela.
+ */
+const PAGE_TIMEOUT = '15000';
 const SENSITIVE = ['Orbitas', 'ORBITAS', 'Planetas', 'PLANETAS', 'Alfa', 'Beta', 'Gama', '.pdf'];
 
 const dir = (id: string, name: string, children: TreeNode[] = []): TreeNode => ({ id, name, type: 'folder', children });
@@ -36,7 +43,7 @@ const WIDE = { maxDepth: 5, maxFolders: 50, maxItems: 1_000, maxPagesPerFolder: 
 type Harness = { firstLoadDelayMs?: number; extraTabs?: string[] };
 
 function env(base: string, fixture: TreeFixtureOptions, harness: Harness): Record<string, string> {
-  const out = { ...process.env, AIR_ORGANIZER_FIXTURE_HARNESS: JSON.stringify(harness), LOCALAPPDATA: path.join(base, 'local'), APPDATA: path.join(base, 'roaming'), AIR_ORGANIZER_FIXTURE: JSON.stringify(fixture), AIR_ORGANIZER_PAGE_TIMEOUT_MS: '5000' } as Record<string, string>;
+  const out = { ...process.env, AIR_ORGANIZER_FIXTURE_HARNESS: JSON.stringify(harness), LOCALAPPDATA: path.join(base, 'local'), APPDATA: path.join(base, 'roaming'), AIR_ORGANIZER_FIXTURE: JSON.stringify(fixture), AIR_ORGANIZER_PAGE_TIMEOUT_MS: PAGE_TIMEOUT } as Record<string, string>;
   for (const key of ['ELECTRON_RUN_AS_NODE', 'AIR_ORGANIZER_PROFILE_DIR', 'AIR_ORGANIZER_CHECKPOINT_DIR', 'AIR_ORGANIZER_URL', 'AIR_ORGANIZER_MAX_PAGES', 'AIR_ORGANIZER_INVENTORY_MAX_AGE_DAYS', 'AIR_ORGANIZER_VERBOSE_ERRORS']) delete out[key];
   return out;
 }
