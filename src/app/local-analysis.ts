@@ -25,6 +25,12 @@ export async function diagnoseInventory(file: string, options: LocalAnalysisOpti
   return { report: analyzeStructure(input, analysis), ...(keyUnavailable ? { keyUnavailable } : {}) };
 }
 
+/** Elegibilidade atual e documento lidos de uma só vez: o critério é o do planejamento, sem outra implementação. */
+export async function inspectInventoryBasis(file: string, options: LocalAnalysisOptions): Promise<{ input: unknown; plan: OrganizationPlan; keyUnavailable?: KeyUnavailable }> {
+  const { input, analysis, keyUnavailable } = await prepare(file, options);
+  return { input, plan: planOrganization(input, analysis), ...(keyUnavailable ? { keyUnavailable } : {}) };
+}
+
 export async function planInventory(file: string, options: LocalAnalysisOptions): Promise<{ plan: OrganizationPlan; keyUnavailable?: KeyUnavailable }> {
   const { input, analysis, keyUnavailable } = await prepare(file, options);
   return { plan: planOrganization(input, analysis), ...(keyUnavailable ? { keyUnavailable } : {}) };

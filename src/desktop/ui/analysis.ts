@@ -11,9 +11,9 @@ const KIND_LABEL: Record<PlanProposal['kind'], string> = {
 };
 const CONFIDENCE_LABEL = { high: 'alta', medium: 'média', low: 'baixa' } as const;
 
-const facts = (entries: Array<[string, string | undefined]>) =>
+export const facts = (entries: Array<[string, string | undefined]>) =>
   el('dl', { class: 'kv' }, ...entries.flatMap(([label, value]) => (value === undefined ? [] : [el('dt', {}, label), el('dd', {}, value)])));
-const bullets = (title: string, items: string[]) => (items.length ? [el('h3', {}, title), el('ul', {}, ...items.map((item) => el('li', {}, item)))] : []);
+export const bullets = (title: string, items: string[]) => (items.length ? [el('h3', {}, title), el('ul', {}, ...items.map((item) => el('li', {}, item)))] : []);
 
 async function loadInventories(selectId: string, run: HTMLElement): Promise<void> {
   const list = await call('listInventories');

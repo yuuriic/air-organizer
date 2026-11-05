@@ -1,6 +1,6 @@
 # AIR Organizer — Arquitetura de Software
 
-> **Status:** arquitetura v1.6 (App Base v0.1 e motor POC-03A, somente leitura) · **Data:** 04/11/2026\
+> **Status:** arquitetura v1.7 (App Base v0.1, motor POC-03A e prévia POC-03B/A, somente leitura) · **Data:** 04/11/2026\
 > **Objetivo:** reduzir o trabalho manual de análise, consolidação e organização de pastas no AIR, começando por uma ferramenta pequena, funcional, segura e reutilizável entre clientes, cidades, setores e implantadores.  
 > **Versão oficial:** este arquivo, no repositório (`air-organizer/ARCHITECTURE.md`). Cópias fora do repositório não são mantidas e não devem ser usadas como referência.  
 > **Dados:** todos os exemplos deste documento são fictícios. Nenhum nome real de cliente, município, setor, pasta ou pessoa deve ser registrado aqui.
@@ -151,6 +151,7 @@ air-organizer/
 │   │   ├── tree-run.ts        # leitura recursiva com checkpoint, exportação e execuções retomáveis
 │   │   ├── folder-operations.ts # conexão e leitura de uma pasta
 │   │   ├── local-analysis.ts  # diagnóstico e planejamento sobre inventário gravado
+│   │   ├── movement-review.ts # seleção por identificadores opacos e prévia sem nomes (POC-03B)
 │   │   ├── connection.ts      # sessão única do Chrome dedicado
 │   │   ├── settings.ts        # settings.json local, validado e sem segredos
 │   │   ├── validation.ts      # validação das entradas vindas da janela
@@ -653,9 +654,9 @@ Confirmadas na operação. Valem para o desenho futuro: **não há** executor, c
 - Um nome como `PROCESSO_00000_2031.pdf` pode gerar **sugestão** de classificação (Processo / 2031), conforme a estrutura existente. Nome de arquivo nunca prova igualdade documental (§8.2).
 - As pastas de origem permanecem: sem exclusão automática.
 
-### 9.3 Motor de movimentações supervisionadas (POC-03A, implementado; sem interface)
+### 9.3 Motor de movimentações supervisionadas (POC-03A, implementado; prévia na tela em §9.4)
 
-`core/movement-planner.ts`, motor puro (sem navegador, rede nem sistema de arquivos), acessível só por `planInventoryMovements` em `app/local-analysis.ts`. Não há tela, IPC nem opção da CLI, e nada é gravado. Aplica as regras do §9 e do §9.2 às **seleções explícitas do operador** e devolve propostas revisáveis. Não há executor: nenhuma proposta é executável, e não existe tipo de operação para excluir, substituir, renomear ou criar.
+`core/movement-planner.ts`, motor puro (sem navegador, rede nem sistema de arquivos), acessível por `planInventoryMovements` em `app/local-analysis.ts`. Não há opção da CLI, e nada é gravado. Aplica as regras do §9 e do §9.2 às **seleções explícitas do operador** e devolve propostas revisáveis. Não há executor: nenhuma proposta é executável, e não existe tipo de operação para excluir, substituir, renomear ou criar.
 
 **Entrada.** Um inventário e as seleções: `file` (arquivo → pasta), `folder` (pasta → para dentro de uma pasta) e `folder-contents` (conteúdo de uma pasta → pasta escolhida, é a confirmação do operador quando os nomes diferem). O motor não escolhe origem nem destino. Os seletores usam o **caminho exato**; `ref` (F*n*) só confere, porque muda entre leituras e nunca desempata homônimos.
 
@@ -701,6 +702,28 @@ Confirmadas na operação. Valem para o desenho futuro: **não há** executor, c
 **Determinismo.** As seleções são postas em ordem canônica. Mesmo inventário + mesmas seleções, em qualquer ordem, + mesmo `now` = mesmo plano, byte a byte. O `id` (`M-` + SHA-256 de versão, inventário autenticado, tipo, origem e destino) não depende de `now`.
 
 **Saída** (`air-organizer/movement-plan`, `schemaVersion: 1`): `dryRun: true`, `executable: false`, `authorizesChanges: false`, `authenticated: false`, avisos, `source`, `validation`, `summary` (com itens envolvidos e não envolvidos), `safeOrder` e `proposals`. `redactMovementPlan` retira nomes, caminhos, seleções, assinaturas e `runId`. **O plano não é autenticado:** vale a mesma restrição do §9.1 para qualquer etapa posterior.
+
+### 9.4 Seleção e prévia na tela Planejamento (POC-03B, Incremento A)
+
+`app/movement-review.ts` e `desktop/ui/movements.ts` ligam o motor do §9.3 à tela. **Nada é executado nem gravado**, e não há operação de escrita no AIR: a API continua sem nada que mova, crie, renomeie ou exclua.
+
+**Fluxo.** O operador escolhe o inventário no seletor existente e pede a análise (`inspectInventory`), que mostra identificação, data, modo de leitura, completude, integridade, elegibilidade e contagens. O critério é o do planejamento (reutiliza `planOrganization`), sem outra implementação. Inventário inelegível pode ser consultado, mas não abre a seleção nem gera propostas. No elegível, o operador escolhe origem e destino em seletores hierárquicos e, para uma pasta, **o que fazer com ela** (levar a pasta ou consolidar o conteúdo): nada é presumido. `previewProposals` chama `planInventoryMovements`, que relê e revalida o inventário.
+
+**Privacidade: nomes e caminhos ficam ocultos por padrão.**
+
+- Até a revelação, a janela recebe só identificadores opacos (F*n* para pastas, A*n* para arquivos) e rótulos neutros. As visões têm uma lista fechada de campos, sem nomes, caminhos, assinaturas nem a seleção.
+- Nomes ficam no processo principal e saem só por `revealSelectionNames`, depois de ação e confirmação do operador. Ficam em memória; a preferência não é persistida.
+- Ocultar descarta os nomes na janela e redesenha seletores e prévias. Eles só entram como texto de elementos, nunca em atributos, títulos ou rótulos de acessibilidade.
+
+**Estado da tela.** Trocar de inventário descarta seleções, nomes e prévia. Mudar origem, destino ou modo invalida a prévia, e trocar a origem também limpa o modo. Resposta de um pedido anterior é descartada, inclusive erro. O resumo traz total, prontas, bloqueadas, consolidações (por `group.status`) e categorias de conflito e de bloqueio.
+
+**Apresentação da prévia.** Um quadro no topo mostra a seleção que gerou a prévia (inventário, origem, destino e modo). Proposta bloqueada tem borda e etiqueta de alerta, com símbolo e texto, além da cor, e nunca aparece como "Pendente de revisão"; consolidação parcial tem destaque próprio. Com qualquer bloqueio, o resumo usa aparência de atenção. Os motivos vêm dos códigos do motor, agrupados em conflitos, bloqueios de segurança, dependências não satisfeitas e outros (`blockingReasonLines`); sem motivo informado, a tela diz isso, em vez de afirmar que não há bloqueios. A ordem segura mostra posição, tipo, origem e destino, com o identificador como referência, na ordem calculada pelo motor.
+
+**IPC.** As três operações entram na allowlist (`API_METHODS`), passam pela conferência de origem existente e validam o payload em tempo de execução: identificadores só no formato opaco, campos desconhecidos recusados e o valor recebido nunca repetido em mensagens. A árvore tem teto (`MAX_SELECTION_NODES`). O rótulo do inventário mascara a pasta de execução fora do formato gerado pela ferramenta (`inventoryLabel`), porque uma pasta renomeada à mão pode conter nomes.
+
+**Seleção.** A janela envia só identificadores, nunca caminhos digitados. Identificadores valem para o inventário analisado: outro inventário, ou um arquivo que mudou depois da análise (comparado pela identidade do selo), é recusado até nova análise. A tela e `selectionFrom` antecipam erros evidentes (mesma pasta, descendente, arquivo como destino, pasta inicial como origem, identidade ambígua ou sem caminho comprovável, sinalizadas e não selecionáveis). Pasta vazia com caminho derivado é selecionável e sinalizada. A avaliação final é sempre do motor.
+
+**Limites deste incremento.** Uma seleção por prévia, aprovada para esta etapa, sem seleção múltipla e sem registro de decisões do revisor. As propostas continuam sem validação com seleções reais definidas pelo operador (§13).
 
 ## 10. Executor supervisionado (somente POC-03)
 
@@ -826,6 +849,8 @@ Entregue: janela Electron com IPC restrito (§5.2); conexão pelo Chrome dedicad
 
 **POC-03A (motor de propostas, §9.3): concluída com validação SINTÉTICA, em 05/11/2026.** Sem acesso ao AIR, sem executor e sem interface. **As propostas não foram validadas com dados reais:** não existem seleções reais de origem e destino, e o motor não foi executado sobre inventários reais. Medição local no fechamento: 2 de 3 inventários reais elegíveis para planejamento (o terceiro, parcial). O número vale para essa data, porque a elegibilidade expira com a idade do inventário. Origem e destino precisam ser **revalidados no AIR antes de qualquer execução futura**. Os critérios abaixo são da execução, ainda não implementada.
 
+**POC-03B, Incremento A (seleção e prévia na tela, §9.4):** só leitura, sem executor. Validada com dados sintéticos.
+
 **Pré-requisitos:** autorização da organização e ambiente de teste/homologação preferencialmente, ou cenário de produção explicitamente autorizado; POC-01 e POC-02 aprovadas.
 
 Critérios de aceite:
@@ -898,6 +923,8 @@ Critérios de aceite:
 - **ADR-016 — Planejamento determinístico não executável (POC-02B.2):** propostas de revisão geradas por um motor puro sobre o inventário, revalidando selo, estrutura, completude (pelas pastas) e idade no momento da geração; inelegível = recusa sem propostas. IDs incorporam a identidade do inventário autenticado. `confidence` é força de evidência, nunca autorização. Possível ação futura só como hipótese não executável, sem origem/destino; nenhum formato de comandos. O plano não é autenticado e não serve de fonte para execução sem nova leitura e revalidação (§9.1).
 - **ADR-017 — Aplicativo desktop Electron como interface oficial (App Base v0.1):** a interface oficial passa a ser um aplicativo desktop local, e não uma interface web independente nem uma extensão Chrome; a CLI permanece como alternativa e para a limpeza de checkpoints expirados. Electron foi escolhido em vez de Tauri porque o processo principal roda os módulos Node.js e o Playwright existentes, sem reescrita, sem sidecar e sem uma segunda linguagem. O custo aceito é um instalador maior e mais um Chromium em memória. A orquestração saiu da CLI para `src/app`, sem depender do Electron, e as duas interfaces a compartilham. A janela não acessa Node e só fala com o processo principal por uma lista fixa de operações (§5.2). A parada usa `AbortSignal`, com alteração mínima no scanner, e fechar o Chrome fica só como recuperação (§7.7.1). A limpeza de checkpoints fica fora da interface. Critérios de elegibilidade e regras de segurança não mudaram, e nada escreve no AIR.
 - **ADR-018 — Propostas de movimentação sobre seleções explícitas (POC-03A):** motor puro, com a elegibilidade do ADR-016, que deriva operações só das seleções do operador. Um inventário por plano: origem e destino no mesmo setor. Correspondência automática só por nome **exato e único**; variação de grafia exige consolidação explícita. Conflito ou dúvida bloqueia a operação, nunca escolhe. Destino precisa existir no inventário. Nenhum tipo de operação exclui, substitui, renomeia ou cria, e nenhuma proposta é executável. A consolidação é um agrupamento lógico, que não libera as operações derivadas, e a pasta de origem permanece. O plano não é autenticado (§9.3). Complementa o planejamento estrutural do ADR-016, sem substituí-lo: os dois têm responsabilidades distintas (§9).
+
+- **ADR-019 — Prévia de movimentações com nomes ocultos (POC-03B, Incremento A):** a tela Planejamento seleciona origem e destino por identificadores opacos, e nomes e caminhos ficam no processo principal até a revelação explícita e confirmada, sem persistir a preferência. Ocultar remove os nomes de seletores, prévias e mensagens. Identificadores valem só para o inventário analisado. A elegibilidade é a do ADR-016, e a avaliação é a do motor do ADR-018. Nada é executado nem gravado (§9.4).
 
 ## 18. Próxima ação concreta
 

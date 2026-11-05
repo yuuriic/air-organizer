@@ -2,6 +2,7 @@ import type { AppEvent, AppStatus, OperationKind } from '../../app/controller.js
 import type { ChromeFailure, ChromeStatus } from '../../app/connection.js';
 import { initAnalysis, refreshInventories } from './analysis.js';
 import { api, byId, call, clearMessage, confirmDialog, el, showMessage } from './dom.js';
+import { initMovements } from './movements.js';
 import { initRead, operatorInput } from './read.js';
 import { initSettings } from './settings.js';
 
@@ -135,5 +136,6 @@ document.addEventListener('air-buttons-changed', refreshButtons);
 api.onEvent(onEvent);
 initRead();
 initAnalysis();
+initMovements();
 initSettings();
 void call('status').then((status) => status && render(status));

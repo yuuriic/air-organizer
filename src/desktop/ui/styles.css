@@ -132,3 +132,12 @@ dialog h2 { color: var(--text); font-size: 16px; }
 dialog p { margin: 10px 0 0; }
 .dialog-actions { justify-content: flex-end; margin-top: 18px; }
 [hidden] { display: none !important; }
+#move-mode { margin-top: 10px; border: 1px solid var(--border); border-radius: 6px; }
+#move-mode label { display: block; }
+#move-selection { margin-top: 12px; padding: 4px 12px 10px; border: 1px solid var(--border); border-radius: 6px; }
+.refs-inline { font-size: 12px; }
+.card.proposal-blocked { border: 2px solid var(--danger); border-left-width: 6px; }
+.card.proposal-partial { border-left: 6px solid var(--warn); }
+.tag.state-blocked { background: var(--danger-bg); color: var(--danger); font-weight: 700; }
+.tag.state-partial { background: var(--warn-bg); color: var(--warn); font-weight: 700; }
+.tag.state-ready { background: #e7eef6; color: #2a4d73; }
