@@ -1,6 +1,6 @@
 # AIR Organizer — Arquitetura de Software
 
-> **Status:** arquitetura v1.4 (App Base v0.1, somente leitura) · **Data:** 04/11/2026\
+> **Status:** arquitetura v1.6 (App Base v0.1 e motor POC-03A, somente leitura) · **Data:** 04/11/2026\
 > **Objetivo:** reduzir o trabalho manual de análise, consolidação e organização de pastas no AIR, começando por uma ferramenta pequena, funcional, segura e reutilizável entre clientes, cidades, setores e implantadores.  
 > **Versão oficial:** este arquivo, no repositório (`air-organizer/ARCHITECTURE.md`). Cópias fora do repositório não são mantidas e não devem ser usadas como referência.  
 > **Dados:** todos os exemplos deste documento são fictícios. Nenhum nome real de cliente, município, setor, pasta ou pessoa deve ser registrado aqui.
@@ -106,7 +106,8 @@ Orquestrador de execução (src/app)
       │
       ├──► Duplicate Analyzer ──► candidatos / evidências
       │
-      ├──► Planner ─────────────► propostas de revisão (hoje); dry-run com destinos (POC-03)
+      ├──► Planejamento estrutural ──► propostas de revisão, sem origem nem destino (§9.1)
+      ├──► Planejamento de movimentações ──► propostas com origem, destino e dependências (§9.3)
       │
       └──► Executor (POC-03, não implementado) ─► AIR Mover ─► UI AIR / Chrome
                     │
@@ -136,6 +137,7 @@ air-organizer/
 │   │   ├── structural-diagnostics.ts # diagnóstico estrutural determinístico (POC-02A)
 │   │   ├── inventory-integrity.ts # selo HMAC do tree-inventory.json: selar e verificar (POC-02B.1)
 │   │   ├── organization-planner.ts # propostas de revisão determinísticas, não executáveis (POC-02B.2)
+│   │   ├── movement-planner.ts # propostas de movimentação com origem e destino, não executáveis (POC-03A)
 │   │   └── duplicates.ts      # normalização e suspeitas de duplicidade
 │   ├── safety/
 │   │   └── scope-validator.ts # ações permitidas, escopo, URLs, caminhos de saída
@@ -185,7 +187,7 @@ air-organizer/
 |---|---|---|
 | `air/context.ts`, `core/context.ts` | POC-01/02 | descoberta e confirmação de cliente/setor pela UI (hoje informados pelo operador) |
 | `air/selectors.ts` | POC-02 | seletores centralizados (hoje estão em `reader.ts`, `navigator.ts` e `folders.ts`) |
-| `core/planner.ts` | POC-02 | DAG de operações e dry-run |
+| `core/planner.ts` | POC-02 | nome previsto para o DAG de operações e o dry-run; essa função foi implementada em `core/movement-planner.ts` (§9.3), e este módulo não será criado. Não confundir com `core/organization-planner.ts` (§9.1), que tem outra responsabilidade |
 | `safety/audit.ts`, `safety/approvals.ts` | POC-02/03 | eventos, reconciliação, aprovação humana |
 | `air/mover.ts` | POC-03 | movimentação supervisionada; **desabilitada** até autorização |
 
@@ -503,7 +505,7 @@ Nomes de arquivos iguais **não provam** conteúdo igual. Sem hash ou metadados 
 
 ### 8.3 Conflitos de hierarquia
 
-A consolidação deve comparar descendentes antes de mover uma pasta inteira. Se duas pastas têm subpastas homônimas, o planner cria operações dependentes para consolidar o conteúdo primeiro; não presume merge automático no AIR.
+A consolidação deve comparar descendentes antes de mover uma pasta inteira. Se duas pastas têm subpastas homônimas, o planejamento de movimentações (§9.3) cria operações dependentes para consolidar o conteúdo primeiro; não presume merge automático no AIR.
 
 ### 8.4 Motor de diagnóstico estrutural (POC-02A, implementado)
 
@@ -570,7 +572,21 @@ Problema (R3 da auditoria da POC-02A): um `tree-inventory.json` editado de forma
 
 **Compatibilidade.** Inventários antigos continuam legíveis e só exploratórios. Não há selagem retroativa: um arquivo lido do disco nunca é selado (a procedência dele não pode ser atestada sem uma nova leitura autorizada); para obter um inventário elegível, faça uma nova leitura (opção 6 ou retomada VERIFICADA). Recriar a chave local invalida os selos anteriores (recusados por `key-mismatch`). Se a chave for apagada durante uma execução, a próxima abertura do store cria outra; os inventários e checkpoints dessa execução passam a ser recusados (`key-mismatch`/digest), nunca aceitos com outra chave. Checkpoints, navegação e `tree-diagnostic.json` não mudam. O relatório estrutural passa a `schemaVersion: 2`, com `integrity` e `completeness`.
 
-## 9. Planejador e dry-run
+## 9. Planejamento e dry-run
+
+Há **dois planejamentos, com responsabilidades distintas**. Nenhum substitui o outro, e os dois continuam ativos:
+
+| | Planejamento estrutural (§9.1, POC-02B.2) | Planejamento de movimentações (§9.3, POC-03A) |
+|---|---|---|
+| Módulo | `core/organization-planner.ts` | `core/movement-planner.ts` |
+| Pergunta | O que nesta estrutura merece revisão? | Dadas a origem e o destino escolhidos, quais operações seriam necessárias, em que ordem, e o que impede cada uma? |
+| Entrada | inventário | inventário e seleções explícitas do operador |
+| Saída | propostas de revisão ligadas a achados, sem origem nem destino | propostas de operação, com origem, destino, dependências, conflitos e bloqueios |
+| Interface e gravação | tela Planejamento, opção 9 da CLI; grava os relatórios | sem interface; só em memória |
+
+O que eles compartilham é a **elegibilidade**: o de movimentações reaproveita a validação do estrutural (selo, estrutura, completude e idade). Ele não consome as propostas do estrutural, e uma proposta de revisão não vira operação sozinha: a escolha de origem e destino é do operador. Nenhum dos dois é executável.
+
+As regras e o dry-run descritos a seguir orientam o planejamento de movimentações.
 
 Entrada: inventário completo ou explicitamente parcial, pasta principal selecionada, candidatos aprovados e limites de execução.
 
@@ -590,7 +606,7 @@ Regras:
 
 **Dry-run é o comportamento padrão**, inclusive quando o usuário solicita um plano.
 
-> As regras acima e a `MoveOperation` valem para a POC-03. A POC-02B.2 (§9.1) **não** gera operações.
+> As regras acima valem para a POC-03. A POC-02B.2 (§9.1) **não** gera operações; a POC-03A (§9.3) gera propostas, nunca executáveis.
 
 ### 9.1 Motor de planejamento determinístico (POC-02B.2, implementado)
 
@@ -626,7 +642,7 @@ Mesmo nome nunca é tratado como conteúdo equivalente (impedimento explícito e
 
 **O plano não é autenticado nesta etapa.** Um arquivo de plano pode ser editado sem detecção e **não pode** servir de fonte confiável para uma execução futura: qualquer etapa posterior deve gerar o plano de novo a partir de um inventário autenticado e recente, e revalidar no AIR.
 
-### 9.2 Regras operacionais confirmadas (orientam a POC-03; não implementadas)
+### 9.2 Regras operacionais confirmadas (orientam a POC-03; a parte de planejamento está na POC-03A, §9.3)
 
 Confirmadas na operação. Valem para o desenho futuro: **não há** executor, comparação documental nem classificação inteligente nesta etapa. Exemplos fictícios.
 
@@ -636,6 +652,55 @@ Confirmadas na operação. Valem para o desenho futuro: **não há** executor, c
 - Quando origem e destino têm a subpasta correspondente (ex.: `2025`), a consolidação aproveita a de destino, em vez de criar outra. Isso refina a regra 7 do §9 só para esse caso; conflitos de nomes e identidades ambíguas continuam exigindo intervenção humana.
 - Um nome como `PROCESSO_00000_2031.pdf` pode gerar **sugestão** de classificação (Processo / 2031), conforme a estrutura existente. Nome de arquivo nunca prova igualdade documental (§8.2).
 - As pastas de origem permanecem: sem exclusão automática.
+
+### 9.3 Motor de movimentações supervisionadas (POC-03A, implementado; sem interface)
+
+`core/movement-planner.ts`, motor puro (sem navegador, rede nem sistema de arquivos), acessível só por `planInventoryMovements` em `app/local-analysis.ts`. Não há tela, IPC nem opção da CLI, e nada é gravado. Aplica as regras do §9 e do §9.2 às **seleções explícitas do operador** e devolve propostas revisáveis. Não há executor: nenhuma proposta é executável, e não existe tipo de operação para excluir, substituir, renomear ou criar.
+
+**Entrada.** Um inventário e as seleções: `file` (arquivo → pasta), `folder` (pasta → para dentro de uma pasta) e `folder-contents` (conteúdo de uma pasta → pasta escolhida, é a confirmação do operador quando os nomes diferem). O motor não escolhe origem nem destino. Os seletores usam o **caminho exato**; `ref` (F*n*) só confere, porque muda entre leituras e nunca desempata homônimos.
+
+**Pasta vazia.** Sem linhas, a leitura não tem coluna "Caminho" (§7.5.2) e grava a subpasta sem `path`. `deriveEmptyFolderPaths` calcula o caminho em memória, a partir de uma pasta que **existe** no inventário, exigindo: nome utilizável; pasta vazia, com leitura completa; URL observada exclusiva; pai com caminho, leitura completa e sem homônimos no caminho; linha de mesmo nome no pai, que confirme o caminho do pai; nenhum item irmão com nome igual ou equivalente; e nenhuma outra pasta com o mesmo caminho. Um caminho construído nunca prova que a pasta existe. A identidade traz `pathProvenance: 'derived-from-parent'` (nos demais casos, `observed`), e a proposta traz um alerta para reconfirmar a pasta. Qualquer condição não atendida bloqueia, com o motivo (`insufficient-data` ou `ambiguous-*`). Isso não altera o inventário, o selo nem os critérios de integridade e completude.
+
+**Elegibilidade.** A mesma do planejamento estrutural (§9.1, reutiliza `planOrganization`): selo, estrutura, completude pelas pastas e idade conferidos de novo. Inventário recusado = plano sem propostas. Um plano cobre **um inventário**, portanto um setor; origem e destino precisam estar nele.
+
+**Operações** (`MovementProposal`):
+
+| Tipo | Quando | Efeito proposto |
+|---|---|---|
+| `move-file` | arquivo selecionado ou arquivo de uma consolidação | leva o arquivo para a pasta de destino |
+| `move-folder` | pasta sem homônima no destino | leva a pasta inteira, preservando a hierarquia interna |
+| `consolidate-folder` | pasta com homônima **exata e única** no destino, ou `folder-contents` | **agrupamento lógico**, sem efeito próprio: registra o par e deriva as operações do conteúdo, recursivamente. A pasta de destino é reaproveitada e a de origem permanece, mesmo vazia |
+
+**Estados.** `generated` (saída de `generateMovementProposals`, antes das verificações entre operações), `blocked` e `ready-for-review` (resultado de `assessMovementProposals`; é o que um plano contém). `review` é sempre `pending`, e `executable`/`authorizesChanges` são sempre `false`.
+
+**Consolidação não libera operações.** Agrupar não aprova nada: `group.authorizesOperations` é sempre `false`, cada operação derivada tem estado e revisão próprios, e uma filha bloqueada nunca entra em `safeOrder`. `group.status` mostra a situação do agrupamento, em todos os níveis, e lista as operações em `readyOperations` e `blockedOperations`:
+
+| `group.status` | Situação | Estado da consolidação |
+|---|---|---|
+| `all-ready` | todas as operações aptas | `ready-for-review` |
+| `partially-blocked` | há operações aptas e bloqueadas; os itens bloqueados permanecem na origem | `ready-for-review`, com alerta. Só vale para as aptas |
+| `fully-blocked` | nenhuma operação apta, ou impedimento da própria consolidação | `blocked` (`no-ready-operations`, se o impedimento vier só das filhas) |
+| `empty` | a origem não tem o que consolidar | `ready-for-review`, com alerta |
+
+**Bloqueios e conflitos** (uma proposta com qualquer um deles fica `blocked`, e as mensagens não têm nomes):
+
+| Situação | Código |
+|---|---|
+| Destino ou origem fora do inventário (nada é criado implicitamente) | `destination-not-found`, `source-not-found` |
+| Homônimos no caminho, em qualquer nível, ou nome repetido na pasta de origem | `ambiguous-source`, `ambiguous-destination` |
+| `ref` divergente, URL repetida, linha de outro ramo, assinatura repetida, pasta selecionada como arquivo | `identity-inconsistent` |
+| Falta nome, caminho, URL ou linha no pai; item de tipo desconhecido; seleção malformada | `insufficient-data`, `unknown-item`, `invalid-selection` |
+| Pasta inicial, para si mesma ou descendente, já no destino, consolidação em que uma pasta contém a outra | `root-move`, `move-into-self`, `already-at-destination`, `overlapping-consolidation` |
+| Mesmo nome no destino (**nunca presume o mesmo conteúdo**) ou nome equivalente após normalização (§8.1, pontuação inclusive) | `name-conflict`, `equivalent-name-conflict` |
+| `2025` para dentro de `2025`, criaria nível repetido | `nested-same-name` |
+| A mesma origem em duas operações, ou dois itens de nomes equivalentes indo ao mesmo destino | `source-claimed-twice`, `destination-collision` |
+| Setor não identificado, ciclo de dependências, dependência bloqueada, consolidação sem operação apta | `sector-not-identified`, `dependency-cycle`, `dependency-blocked`, `no-ready-operations` |
+
+**Dependências e ordem.** A consolidação vem antes das operações derivadas dela. Quando uma pasta inteira é movida, tudo o que retira algo dela ou leva algo para ela vem **antes**, para que os caminhos conferidos sejam os do inventário. Um destino precisa existir no inventário: nenhuma operação depende de outra para "criar" o destino. Bloqueio se propaga a quem depende. Uma filha bloqueada não bloqueia as irmãs: o restante continua revisável, e a consolidação de cima informa a situação em `group`. `safeOrder` é a ordem topológica (desempate estável) só das propostas aptas; é ordem de revisão, não roteiro de execução.
+
+**Determinismo.** As seleções são postas em ordem canônica. Mesmo inventário + mesmas seleções, em qualquer ordem, + mesmo `now` = mesmo plano, byte a byte. O `id` (`M-` + SHA-256 de versão, inventário autenticado, tipo, origem e destino) não depende de `now`.
+
+**Saída** (`air-organizer/movement-plan`, `schemaVersion: 1`): `dryRun: true`, `executable: false`, `authorizesChanges: false`, `authenticated: false`, avisos, `source`, `validation`, `summary` (com itens envolvidos e não envolvidos), `safeOrder` e `proposals`. `redactMovementPlan` retira nomes, caminhos, seleções, assinaturas e `runId`. **O plano não é autenticado:** vale a mesma restrição do §9.1 para qualquer etapa posterior.
 
 ## 10. Executor supervisionado (somente POC-03)
 
@@ -759,6 +824,8 @@ Entregue: janela Electron com IPC restrito (§5.2); conexão pelo Chrome dedicad
 
 ### POC-03 — Movimentação supervisionada
 
+**POC-03A (motor de propostas, §9.3): concluída com validação SINTÉTICA, em 05/11/2026.** Sem acesso ao AIR, sem executor e sem interface. **As propostas não foram validadas com dados reais:** não existem seleções reais de origem e destino, e o motor não foi executado sobre inventários reais. Medição local no fechamento: 2 de 3 inventários reais elegíveis para planejamento (o terceiro, parcial). O número vale para essa data, porque a elegibilidade expira com a idade do inventário. Origem e destino precisam ser **revalidados no AIR antes de qualquer execução futura**. Os critérios abaixo são da execução, ainda não implementada.
+
 **Pré-requisitos:** autorização da organização e ambiente de teste/homologação preferencialmente, ou cenário de produção explicitamente autorizado; POC-01 e POC-02 aprovadas.
 
 Critérios de aceite:
@@ -774,7 +841,7 @@ Critérios de aceite:
 
 - **Unitários:** normalização, comparação de nomes, detecção de ciclos, escopo de setor, ordenação de dependências, checkpoint.
 - **Integração local:** fixtures HTML sintéticas para tabelas, paginação, seleção e mudança de conteúdo.
-- **Aplicativo e CLI reais (só no Windows):** janela, IPC, Chrome dedicado, interrupções e menu da CLI sobre fixtures sintéticas, com perfil, chave e saídas temporários. O aplicativo de teste tem outro ponto de entrada; não há atalho de teste no código de produção.
+- **Aplicativo e CLI reais (só no Windows):** janela, IPC, Chrome dedicado, interrupções e menu da CLI sobre fixtures sintéticas, com perfil, chave e saídas temporários. O aplicativo de teste tem outro ponto de entrada; não há atalho de teste no código de produção. **Limite de carga e temporização:** os testes do Electron dependem de prazos (30 s por espera, 120 s por teste). Passam na suíte em condição normal, mas, com a CPU saturada de forma contínua, os fluxos de parar e fechar estouram esses prazos. A falha pode se propagar (`Hook timed out`, `EBUSY`) e deixar processos e pastas `air-organizer-desktop-*` no diretório temporário. Essa falha indica falta de folga do ambiente, não por si só um defeito do aplicativo.
 - **Read-only real:** Chrome em sessão autorizada, pasta pequena, nenhuma ação de escrita.
 - **Movimentação:** somente em cenário aprovado, com dados de teste e conferência humana.
 - **Regressão:** fixtures do bug de seleção entre páginas; testes devem falhar se o executor confiar apenas no estado visual.
@@ -798,6 +865,7 @@ Critérios de aceite:
 | Critério rígido deixa inventários reais fora do planejamento | Homônimos exatos e itens de outro ramo tornam a leitura parcial e o plano é recusado. Medir a frequência no uso real antes da POC-03; a exploração continua no Diagnóstico |
 | `output/` relativo à pasta de execução | Sem efeito com `npm run app`; precisa de local fixo antes de um instalador |
 | Testes do aplicativo só no Windows | O CI (Ubuntu) os ignora; rodar `npm test` no Windows antes de integrar |
+| Navegação inicial acima do prazo por página | Por desenho, o Chrome abre com a aba em branco e um aviso, e a verificação pede para navegar manualmente. Nos testes do aplicativo, o prazo da fixture é o padrão (15 s), porque 5 s estourava sob carga |
 | Controle de Chrome existente | Validar conexão segura e isolada; não presumir acesso automático |
 | Restrições de política da empresa | Confirmar autorização antes de automatizar produção |
 
@@ -829,14 +897,15 @@ Critérios de aceite:
 - **ADR-015 — Selo de integridade dos inventários (POC-02B.1):** o `tree-inventory.json` é selado na gravação com HMAC-SHA256, usando uma subchave HKDF-SHA256 derivada da chave local dos checkpoints (propósitos separados, um único segredo), sobre o JSON canônico do documento inteiro e do cabeçalho. A subchave vem da chave que o `CheckpointStore` carregou para a execução (sem reler nem recriar a chave na exportação), e o selo é calculado sobre um snapshot independente, o mesmo que é gravado. Só inventário `authenticated` pode ser `planning-eligible`; sem selo (legado ou selo removido, indistinguíveis) ou sem chave = exploratório; selo inválido = recusado. Sem selagem retroativa e sem serviços externos. Integridade autenticada não significa conteúdo atual e não autoriza movimentação (§8.5).
 - **ADR-016 — Planejamento determinístico não executável (POC-02B.2):** propostas de revisão geradas por um motor puro sobre o inventário, revalidando selo, estrutura, completude (pelas pastas) e idade no momento da geração; inelegível = recusa sem propostas. IDs incorporam a identidade do inventário autenticado. `confidence` é força de evidência, nunca autorização. Possível ação futura só como hipótese não executável, sem origem/destino; nenhum formato de comandos. O plano não é autenticado e não serve de fonte para execução sem nova leitura e revalidação (§9.1).
 - **ADR-017 — Aplicativo desktop Electron como interface oficial (App Base v0.1):** a interface oficial passa a ser um aplicativo desktop local, e não uma interface web independente nem uma extensão Chrome; a CLI permanece como alternativa e para a limpeza de checkpoints expirados. Electron foi escolhido em vez de Tauri porque o processo principal roda os módulos Node.js e o Playwright existentes, sem reescrita, sem sidecar e sem uma segunda linguagem. O custo aceito é um instalador maior e mais um Chromium em memória. A orquestração saiu da CLI para `src/app`, sem depender do Electron, e as duas interfaces a compartilham. A janela não acessa Node e só fala com o processo principal por uma lista fixa de operações (§5.2). A parada usa `AbortSignal`, com alteração mínima no scanner, e fechar o Chrome fica só como recuperação (§7.7.1). A limpeza de checkpoints fica fora da interface. Critérios de elegibilidade e regras de segurança não mudaram, e nada escreve no AIR.
+- **ADR-018 — Propostas de movimentação sobre seleções explícitas (POC-03A):** motor puro, com a elegibilidade do ADR-016, que deriva operações só das seleções do operador. Um inventário por plano: origem e destino no mesmo setor. Correspondência automática só por nome **exato e único**; variação de grafia exige consolidação explícita. Conflito ou dúvida bloqueia a operação, nunca escolhe. Destino precisa existir no inventário. Nenhum tipo de operação exclui, substitui, renomeia ou cria, e nenhuma proposta é executável. A consolidação é um agrupamento lógico, que não libera as operações derivadas, e a pasta de origem permanece. O plano não é autenticado (§9.3). Complementa o planejamento estrutural do ADR-016, sem substituí-lo: os dois têm responsabilidades distintas (§9).
 
 ## 18. Próxima ação concreta
 
-**Situação:** a App Base v0.1 está entregue (§5.2, ADR-017), estritamente somente leitura, sobre a POC-01 (leitura e retomada, §7), a POC-02A (diagnóstico, §8.4), a POC-02B.1 (selo, §8.5) e a POC-02B.2 (planejamento não executável, §9.1). O achado do `return-failed` após paginar está diagnosticado e corrigido (§7.8).
+**Situação:** a App Base v0.1 está entregue (§5.2, ADR-017), estritamente somente leitura, sobre a POC-01 (leitura e retomada, §7), a POC-02A (diagnóstico, §8.4), a POC-02B.1 (selo, §8.5) e a POC-02B.2 (planejamento não executável, §9.1). A POC-03A (§9.3) foi concluída com validação sintética, sem validação real das propostas (§13). O achado do `return-failed` após paginar está diagnosticado e corrigido (§7.8).
 
 Pendências de validação no AIR real: cada modo de retomada isoladamente e abertura de subpasta em página oculta (README, "Limitações conhecidas"). Decidir sobre o campo "Ir" continua em aberto.
 
-**Próxima etapa:** POC-03, movimentação supervisionada, seguindo as regras do §9 e do §9.2 e os pré-requisitos da seção POC-03 (§13). Antes, medir com que frequência inventários reais ficam elegíveis para planejamento (§15). `homonyms: 'identify-by-url'` continua desativado, sem nova investigação (§7.5.1). Não implementar nem habilitar `mover.ts` sem a autorização correspondente.
+**Próxima etapa:** antes da POC-03B, validar as propostas com seleções reais definidas pelo operador, em memória, sobre um inventário elegível que cubra origem e destino. Depois, a execução da POC-03, seguindo as regras do §9 e do §9.2 e os pré-requisitos da seção POC-03 (§13). Antes, medir com que frequência inventários reais ficam elegíveis para planejamento (§15). `homonyms: 'identify-by-url'` continua desativado, sem nova investigação (§7.5.1). Não implementar nem habilitar `mover.ts` sem a autorização correspondente.
 
 ---
 

@@ -1,3 +1,4 @@
+import { planMovements, type MovementPlan, type MovementRequest } from '../core/movement-planner.js';
 import { planOrganization, type OrganizationPlan } from '../core/organization-planner.js';
 import { analyzeStructure, type StructuralReport } from '../core/structural-diagnostics.js';
 import { DEFAULT_OUTPUT_DIR } from '../storage/export.js';
@@ -27,4 +28,10 @@ export async function diagnoseInventory(file: string, options: LocalAnalysisOpti
 export async function planInventory(file: string, options: LocalAnalysisOptions): Promise<{ plan: OrganizationPlan; keyUnavailable?: KeyUnavailable }> {
   const { input, analysis, keyUnavailable } = await prepare(file, options);
   return { plan: planOrganization(input, analysis), ...(keyUnavailable ? { keyUnavailable } : {}) };
+}
+
+/** Prévia de movimentações sobre inventário gravado (POC-03A). Só gera propostas: nada é gravado nem movido. */
+export async function planInventoryMovements(file: string, request: MovementRequest, options: LocalAnalysisOptions): Promise<{ plan: MovementPlan; keyUnavailable?: KeyUnavailable }> {
+  const { input, analysis, keyUnavailable } = await prepare(file, options);
+  return { plan: planMovements(input, request, analysis), ...(keyUnavailable ? { keyUnavailable } : {}) };
 }
