@@ -55,7 +55,7 @@ export type StoreOptions = CheckpointLocations & {
   repositoryDir?: string;
 };
 
-async function writeAtomic(target: string, text: string): Promise<void> {
+export async function writeAtomic(target: string, text: string): Promise<void> {
   const temp = `${target}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
   await writeFile(temp, text, { encoding: 'utf-8', flag: 'wx', mode: 0o600 });
   // No Windows, antivírus/indexador podem segurar o arquivo por instantes.

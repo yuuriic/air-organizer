@@ -107,6 +107,17 @@ export function startDesktop({ launch, appDir }: ShellOptions): void {
     controller = new AppController({
       launch,
       settingsFile: path.join(app.getPath('userData'), 'settings.json'),
+      confirmDecisionHistoryReset: () =>
+        mainWindow !== undefined &&
+        dialog.showMessageBoxSync(mainWindow, {
+          type: 'warning',
+          title: 'AIR Organizer',
+          message: 'Iniciar um novo histórico de decisões?',
+          detail: 'O histórico atual deste inventário não pôde ser validado. Ele será guardado como cópia de recuperação, e as decisões dele NÃO serão importadas: o novo histórico começa vazio. Nada é alterado no AIR.',
+          buttons: ['Cancelar', 'Guardar cópia e iniciar novo histórico'],
+          defaultId: 0,
+          cancelId: 0,
+        }) === 1,
       emit: (event) => {
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(EVENT_CHANNEL, event);
       },

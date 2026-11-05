@@ -1,3 +1,4 @@
+import { MAX_JUSTIFICATION_LENGTH, isProposalId, isValidJustification, type HumanDecision, type ProposalDecisionState } from '../core/movement-decisions.js';
 import { deriveEmptyFolderPaths, type BlockerCode, type ConflictCode, type ConsolidationGroup, type MovementKind, type MovementPlan, type MovementSelection, type MovementState } from '../core/movement-planner.js';
 import { byRef } from '../core/structural-diagnostics.js';
 import type { AirItem, FolderNode, TreeInventoryExport } from '../types/inventory.js';
@@ -137,6 +138,27 @@ export function parsePreviewRequest(input: unknown): PreviewRequest {
   return { inventoryId: id, source, destination, ...(mode ? { mode } : {}) };
 }
 
+export type DecisionRequest = { selection: PreviewRequest; proposalId: string; decision: HumanDecision; justification?: string };
+
+const DECISION_KEYS = new Set(['selection', 'proposalId', 'decision', 'justification']);
+
+/**
+ * A janela só informa QUAL proposta e o que decidiu. O estado da proposta nunca vem daqui: o processo
+ * principal refaz o plano a partir da seleção. O valor recebido nunca volta numa mensagem.
+ */
+export function parseDecisionRequest(input: unknown): DecisionRequest {
+  if (typeof input !== 'object' || input === null || Array.isArray(input) || Object.keys(input).some((key) => !DECISION_KEYS.has(key))) throw new InvalidInput('Pedido de decisão inválido.');
+  const { selection, proposalId, decision, justification } = input as Record<string, unknown>;
+  const parsed = parsePreviewRequest(selection);
+  if (!isProposalId(proposalId)) throw new InvalidInput('Proposta inválida. Gere a prévia de novo.');
+  if (decision !== 'approved' && decision !== 'rejected') throw new InvalidInput('Decisão inválida: escolha aprovar ou rejeitar.');
+  if (justification !== undefined && typeof justification !== 'string') throw new InvalidInput('Justificativa inválida.');
+  const text = justification?.replace(/\r\n?/g, '\n').trim();
+  if (text && text.length > MAX_JUSTIFICATION_LENGTH) throw new InvalidInput(`A justificativa pode ter até ${MAX_JUSTIFICATION_LENGTH} caracteres.`);
+  if (text && !isValidJustification(text)) throw new InvalidInput('A justificativa tem caracteres não permitidos.');
+  return { selection: parsed, proposalId, decision, ...(text ? { justification: text } : {}) };
+}
+
 /**
  * Transforma a escolha da janela, só com identificadores, numa seleção do motor. Recusa o que é
  * evidentemente inválido; nunca escolhe nem completa nada pelo operador.
@@ -181,6 +203,8 @@ export type ProposalPreview = {
   blockers: ProposalIssueView[];
   group?: ConsolidationGroup;
   review: 'pending';
+  /** Revisão do operador, conferida contra o plano atual. Não altera o estado acima nem autoriza nada. */
+  decision: ProposalDecisionState;
 };
 
 /** Códigos do motor por categoria, para o resumo. Sem nomes. */
@@ -241,7 +265,7 @@ export function blockingReasonLines(plan: MovementPlan): string[] {
   return lines;
 }
 
-export function proposalPreviews(plan: MovementPlan, tree: SelectionTree): ProposalPreview[] {
+export function proposalPreviews(plan: MovementPlan, tree: SelectionTree, decisions: Map<string, ProposalDecisionState>): ProposalPreview[] {
   const issue = ({ code, message }: { code: string; message: string }): ProposalIssueView => ({ code, message });
   return plan.proposals.map((p) => {
     const source = p.source?.kind === 'folder' ? p.source.ref : p.source ? tree.fileIds.get(fileKey(p.source.parentRef, p.source.observationKey)) : undefined;
@@ -264,6 +288,7 @@ export function proposalPreviews(plan: MovementPlan, tree: SelectionTree): Propo
       blockers: p.blockers.map(issue),
       ...(p.group ? { group: p.group } : {}),
       review: p.review.status,
+      decision: decisions.get(p.id)!,
     };
   });
 }

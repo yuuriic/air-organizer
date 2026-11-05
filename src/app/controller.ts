@@ -8,20 +8,23 @@ import { detectEnvironment, type OperatorContext } from '../air/navigator.js';
 import { ListingNotFoundError } from '../air/reader.js';
 import { resolveInstanceUrl } from '../cli/args.js';
 import { ResumeRejectedError, type CheckpointState } from '../core/checkpoint.js';
+import { DecisionRefused, createDecisionRecord, latestJustifications, reconcileDecisions, type DecisionSummary } from '../core/movement-decisions.js';
 import type { MovementPlan } from '../core/movement-planner.js';
 import { redactPlan, type OrganizationPlan, type PlanProposal } from '../core/organization-planner.js';
 import { formatFinding, redactReport, type StructuralReport } from '../core/structural-diagnostics.js';
 import { formatTreeEvent } from '../core/tree-scanner.js';
 import { OpenRefusedError, SafetyViolation, assertReadOnlyMode, validateAnalysisScope } from '../safety/scope-validator.js';
+import { InvalidDecisionHistory, appendDecision, decisionsDirectory, loadDecisions, startNewDecisionHistory, type DecisionFileStatus } from '../storage/decision-files.js';
 import { CheckpointStore, defaultCheckpointLocations, type CheckpointEntry, type CheckpointSession } from '../storage/checkpoints.js';
 import { DEFAULT_OUTPUT_DIR, displayPath, exportInventoryResult, inventoryLabel, newRunId } from '../storage/export.js';
+import { openDecisionAuthenticator } from '../storage/integrity-key.js';
 import { describeLocalFailure, exportOrganizationPlan, exportStructuralReport, listTreeInventories } from '../storage/inventory-files.js';
 import type { Inventory, ResumeMode, TreeInventoryExport, TreeLimits, TreeProgress, TreeResult } from '../types/inventory.js';
 import { DedicatedChromeSession, type ChromeStatus } from './connection.js';
 import { describePaging, readConnectionSnapshot, readFolderInventory } from './folder-operations.js';
 import { COMPLETENESS_LABEL, ELIGIBILITY_LABEL, MODE_LABEL, STATUS_LABEL, coverageLines, describeLimits, integrityLabel, reasonLabel, treeSummaryLines } from './labels.js';
 import { diagnoseInventory, inspectInventoryBasis, planInventory, planInventoryMovements } from './local-analysis.js';
-import { MAX_SELECTION_NODES, blockingReasonLines, buildSelectionTree, issueCategories, parseInventoryId, parsePreviewRequest, proposalPreviews, selectionFrom, type ProposalPreview, type SelectionNode, type SelectionTree } from './movement-review.js';
+import { MAX_SELECTION_NODES, blockingReasonLines, buildSelectionTree, issueCategories, parseDecisionRequest, parseInventoryId, parsePreviewRequest, proposalPreviews, selectionFrom, type PreviewRequest, type ProposalPreview, type SelectionNode, type SelectionTree } from './movement-review.js';
 import { operationalConfig } from './runtime.js';
 import { applySettings, loadSettings, lockedFields, saveSettings, validateSettings, type SettingField, type Settings } from './settings.js';
 import { TREE_DEFAULTS, exportTreeRun, matchResumableRuns, pendingFolders, runTreeScan, type TreeRun } from './tree-run.js';
@@ -99,6 +102,7 @@ export type MovementPreviewView = {
   blockingReasons: string[];
   safeOrder: string[];
   proposals: ProposalPreview[];
+  decisions: DecisionSummary & { file: DecisionFileStatus };
 };
 export type NamesView = Array<{ id: string; title: string; folders: Array<{ ref: string; label: string }>; details: string[] }>;
 export type SettingsView = {
@@ -143,6 +147,11 @@ export type ControllerDeps = {
   /** Ambiente deste processo, ajustado pelas configurações. Padrão: process.env. */
   env?: Record<string, string | undefined>;
   outputDir?: string;
+  /**
+   * Confirmação no processo principal para iniciar um novo histórico de decisões: fica fora do alcance
+   * da janela, então uma chamada direta ao IPC não a dispensa. Ausente = nunca confirmado.
+   */
+  confirmDecisionHistoryReset?: () => boolean;
 };
 
 /**
@@ -676,7 +685,7 @@ export class AppController {
     return (await exportOrganizationPlan(this.lastPlan.plan, this.lastPlan.file, { detailed: true }, this.outputDir)).map((f) => displayPath(f, this.outputDir));
   }
 
-  /* ───────────── Prévia de movimentações (POC-03B): nada é executado nem gravado ───────────── */
+  /* ───────────── Prévia e revisão de movimentações (POC-03B): nada é executado no AIR ───────────── */
 
   /** Elegibilidade pelo critério do planejamento. Só inventário elegível abre a seleção. */
   inspectInventory(input: unknown): Promise<MovementInspectionView> {
@@ -722,27 +731,99 @@ export class AppController {
   previewProposals(input: unknown): Promise<MovementPreviewView> {
     return this.exclusive('planning', async () => {
       const request = parsePreviewRequest(input);
-      const selection = this.openSelection(request.inventoryId);
-      const movement = selectionFrom(selection.tree, request);
-      // O motor relê e revalida o inventário; os identificadores só valem para o arquivo em que foram criados.
-      const { plan } = await planInventoryMovements(this.inventoryFile(request.inventoryId), { selections: [movement] }, this.localOptions());
-      if (plan.validation.status === 'accepted' && plan.source.inventoryId !== selection.authenticatedId) {
-        this.selection = undefined;
-        throw new AppError('inventory-changed', 'O inventário mudou desde a análise. Analise-o de novo antes de selecionar.');
-      }
-      return {
-        accepted: plan.validation.status === 'accepted',
-        executable: plan.executable,
-        authorizesChanges: plan.authorizesChanges,
-        reasons: plan.validation.reasons.map(reasonLabel),
-        notices: plan.notices,
-        summary: plan.summary,
-        categories: issueCategories(plan),
-        blockingReasons: blockingReasonLines(plan),
-        safeOrder: plan.safeOrder,
-        proposals: proposalPreviews(plan, selection.tree),
-      };
+      return this.previewView(request, await this.currentPlan(request));
     });
+  }
+
+  /**
+   * Registra uma decisão humana. Só revisão local: nada é executado nem autorizado. O plano é refeito
+   * aqui, a partir do inventário: nada do que a janela diga sobre a proposta é levado em conta.
+   */
+  decideProposal(input: unknown): Promise<MovementPreviewView> {
+    return this.exclusive('planning', async () => {
+      const { selection, proposalId, decision, justification } = parseDecisionRequest(input);
+      const plan = await this.currentPlan(selection);
+      if (plan.validation.status !== 'accepted') throw new AppError('inventory-not-eligible', 'Este inventário não está elegível agora: nenhuma decisão foi registrada.');
+      const proposal = plan.proposals.find((p) => p.id === proposalId);
+      if (!proposal) throw new AppError('proposal-not-found', 'Esta proposta não faz parte da seleção atual. Gere a prévia de novo.');
+      const auth = await this.decisionAuthenticator();
+      const now = new Date();
+      try {
+        await appendDecision(this.decisionsDir(), createDecisionRecord(plan, proposal, decision, justification, now, auth), auth);
+      } catch (error) {
+        if (error instanceof InvalidDecisionHistory) throw new AppError('decision-history-invalid', 'O histórico local de decisões deste inventário é inválido: nenhuma decisão foi registrada. Inicie um novo histórico para continuar.');
+        if (error instanceof DecisionRefused) throw new AppError('decision-refused', error.message);
+        if (error instanceof RangeError) throw new AppError('decisions-too-large', 'O histórico de decisões deste inventário atingiu o limite local. Nenhuma decisão foi registrada.');
+        throw error;
+      }
+      return this.previewView(selection, plan);
+    });
+  }
+
+  /** Justificativas podem conter nomes digitados pelo operador: saem só junto com a revelação de nomes. */
+  async revealDecisionNotes(input: unknown): Promise<Record<string, string>> {
+    const selection = this.openSelection(parseInventoryId(input));
+    const { records } = await loadDecisions(this.decisionsDir(), selection.authenticatedId, await this.decisionAuthenticator());
+    return latestJustifications(records);
+  }
+
+  /**
+   * Histórico inválido: só com a confirmação do processo principal, guarda o arquivo como cópia e começa
+   * um novo, sem importar nada dele. Histórico válido ou ausente não passa por aqui nem pede confirmação.
+   */
+  resetDecisionHistory(input: unknown): Promise<{ outcome: 'reset' | 'cancelled' }> {
+    return this.exclusive('planning', async () => {
+      const { authenticatedId } = this.openSelection(parseInventoryId(input));
+      const auth = await this.decisionAuthenticator();
+      const { status } = await loadDecisions(this.decisionsDir(), authenticatedId, auth);
+      if (status !== 'invalid') throw new AppError('decision-history-not-invalid', 'O histórico deste inventário não está inválido: nada foi alterado.');
+      if (!this.deps.confirmDecisionHistoryReset?.()) return { outcome: 'cancelled' as const };
+      await startNewDecisionHistory(this.decisionsDir(), authenticatedId, auth, new Date());
+      return { outcome: 'reset' as const };
+    });
+  }
+
+  private decisionsDir(): string {
+    return decisionsDirectory(this.locations().keyFile);
+  }
+
+  private async decisionAuthenticator() {
+    const auth = await openDecisionAuthenticator(this.locations().keyFile);
+    if (!auth) throw new AppError('decisions-unavailable', 'A chave local não está disponível: as decisões não podem ser conferidas nem registradas.');
+    return auth;
+  }
+
+  /** O motor relê e revalida o inventário; os identificadores só valem para o arquivo em que foram criados. */
+  private async currentPlan(request: PreviewRequest): Promise<MovementPlan> {
+    const selection = this.openSelection(request.inventoryId);
+    const movement = selectionFrom(selection.tree, request);
+    const { plan } = await planInventoryMovements(this.inventoryFile(request.inventoryId), { selections: [movement] }, this.localOptions());
+    if (plan.validation.status === 'accepted' && plan.source.inventoryId !== selection.authenticatedId) {
+      this.selection = undefined;
+      throw new AppError('inventory-changed', 'O inventário mudou desde a análise. Analise-o de novo antes de selecionar.');
+    }
+    return plan;
+  }
+
+  private async previewView(request: PreviewRequest, plan: MovementPlan): Promise<MovementPreviewView> {
+    const selection = this.openSelection(request.inventoryId);
+    const accepted = plan.validation.status === 'accepted';
+    const auth = accepted ? await this.decisionAuthenticator() : undefined;
+    const loaded = auth ? await loadDecisions(this.decisionsDir(), selection.authenticatedId, auth) : { status: 'absent' as const, records: [] };
+    const { states, summary } = auth ? reconcileDecisions(plan, loaded.records, auth) : { states: new Map(), summary: { approved: 0, rejected: 0, pending: 0, notApprovable: 0, invalidated: 0 } };
+    return {
+      accepted,
+      executable: plan.executable,
+      authorizesChanges: plan.authorizesChanges,
+      reasons: plan.validation.reasons.map(reasonLabel),
+      notices: plan.notices,
+      summary: plan.summary,
+      categories: issueCategories(plan),
+      blockingReasons: blockingReasonLines(plan),
+      safeOrder: plan.safeOrder,
+      proposals: proposalPreviews(plan, selection.tree, states),
+      decisions: { ...summary, file: loaded.status },
+    };
   }
 
   /* ───────────── Configurações ───────────── */

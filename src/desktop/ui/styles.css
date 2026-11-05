@@ -141,3 +141,8 @@ dialog p { margin: 10px 0 0; }
 .tag.state-blocked { background: var(--danger-bg); color: var(--danger); font-weight: 700; }
 .tag.state-partial { background: var(--warn-bg); color: var(--warn); font-weight: 700; }
 .tag.state-ready { background: #e7eef6; color: #2a4d73; }
+.tag.state-approved { background: #e6f2e8; color: #24613a; font-weight: 700; }
+.tag.state-rejected { background: #eceef0; color: #3f4750; font-weight: 700; }
+.decision { margin-top: 10px; padding: 4px 12px 10px; border: 1px solid var(--border); border-radius: 6px; }
+.decision textarea { display: block; width: 100%; box-sizing: border-box; margin-top: 4px; }
+.decision .actions { margin-top: 8px; }

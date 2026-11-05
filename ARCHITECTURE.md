@@ -1,6 +1,6 @@
 # AIR Organizer — Arquitetura de Software
 
-> **Status:** arquitetura v1.7 (App Base v0.1, motor POC-03A e prévia POC-03B/A, somente leitura) · **Data:** 04/11/2026\
+> **Status:** arquitetura v1.8 (App Base v0.1, motor POC-03A, prévia POC-03B/A e revisão humana POC-03B/B, sem escrita no AIR) · **Data:** 05/11/2026\
 > **Objetivo:** reduzir o trabalho manual de análise, consolidação e organização de pastas no AIR, começando por uma ferramenta pequena, funcional, segura e reutilizável entre clientes, cidades, setores e implantadores.  
 > **Versão oficial:** este arquivo, no repositório (`air-organizer/ARCHITECTURE.md`). Cópias fora do repositório não são mantidas e não devem ser usadas como referência.  
 > **Dados:** todos os exemplos deste documento são fictícios. Nenhum nome real de cliente, município, setor, pasta ou pessoa deve ser registrado aqui.
@@ -138,6 +138,7 @@ air-organizer/
 │   │   ├── inventory-integrity.ts # selo HMAC do tree-inventory.json: selar e verificar (POC-02B.1)
 │   │   ├── organization-planner.ts # propostas de revisão determinísticas, não executáveis (POC-02B.2)
 │   │   ├── movement-planner.ts # propostas de movimentação com origem e destino, não executáveis (POC-03A)
+│   │   ├── movement-decisions.ts # decisões humanas: regras, assinatura e validação, sem efeito no AIR (POC-03B)
 │   │   └── duplicates.ts      # normalização e suspeitas de duplicidade
 │   ├── safety/
 │   │   └── scope-validator.ts # ações permitidas, escopo, URLs, caminhos de saída
@@ -145,13 +146,14 @@ air-organizer/
 │   │   ├── export.ts          # relatórios diagnósticos e inventários JSON (escrita atômica)
 │   │   ├── checkpoints.ts     # checkpoints locais: chave HMAC, escrita atômica, trava, retenção
 │   │   ├── inventory-files.ts # inventários exportados, relatórios estruturais e planos em output/
-│   │   └── integrity-key.ts   # subchave HKDF dos selos, derivada da chave local (POC-02B.1)
+│   │   ├── decision-files.ts  # histórico local de decisões humanas, fora do repositório (POC-03B)
+│   │   └── integrity-key.ts   # subchaves HKDF dos selos, derivadas da chave local (POC-02B.1)
 │   ├── app/                   # orquestração sem interface, usada pelo aplicativo e pela CLI
 │   │   ├── controller.ts      # operações do aplicativo: uma por vez, visões sem nomes, erros seguros
 │   │   ├── tree-run.ts        # leitura recursiva com checkpoint, exportação e execuções retomáveis
 │   │   ├── folder-operations.ts # conexão e leitura de uma pasta
 │   │   ├── local-analysis.ts  # diagnóstico e planejamento sobre inventário gravado
-│   │   ├── movement-review.ts # seleção por identificadores opacos e prévia sem nomes (POC-03B)
+│   │   ├── movement-review.ts # seleção por identificadores opacos, prévia sem nomes e pedidos de decisão (POC-03B)
 │   │   ├── connection.ts      # sessão única do Chrome dedicado
 │   │   ├── settings.ts        # settings.json local, validado e sem segredos
 │   │   ├── validation.ts      # validação das entradas vindas da janela
@@ -723,7 +725,37 @@ Confirmadas na operação. Valem para o desenho futuro: **não há** executor, c
 
 **Seleção.** A janela envia só identificadores, nunca caminhos digitados. Identificadores valem para o inventário analisado: outro inventário, ou um arquivo que mudou depois da análise (comparado pela identidade do selo), é recusado até nova análise. A tela e `selectionFrom` antecipam erros evidentes (mesma pasta, descendente, arquivo como destino, pasta inicial como origem, identidade ambígua ou sem caminho comprovável, sinalizadas e não selecionáveis). Pasta vazia com caminho derivado é selecionável e sinalizada. A avaliação final é sempre do motor.
 
-**Limites deste incremento.** Uma seleção por prévia, aprovada para esta etapa, sem seleção múltipla e sem registro de decisões do revisor. As propostas continuam sem validação com seleções reais definidas pelo operador (§13).
+**Limites deste incremento.** Uma seleção por prévia, aprovada para esta etapa, sem seleção múltipla. As decisões do revisor estão no §9.5. As propostas continuam sem validação com seleções reais definidas pelo operador (§13).
+
+### 9.5 Revisão humana e histórico local (POC-03B, Incremento B)
+
+`core/movement-decisions.ts` (regras, sem arquivos nem rede), `storage/decision-files.ts` (arquivos) e a tela do §9.4. **Uma decisão só registra a revisão do operador.** Não executa, não autoriza e não altera a proposta: `executable: false`, `authorizesChanges: false` e `group.authorizesOperations: false` continuam obrigatórios, e plano ou proposta que digam o contrário são recusados como erro de contrato. Não existe caminho no código que leve de uma decisão a uma operação no AIR.
+
+**Regras.**
+
+- **Aprovar:** só proposta em `ready-for-review`, conforme o motor. Bloqueada não pode. Consolidação `partially-blocked` também não: só cada operação apta, individualmente.
+- **Consolidação e operações são decididas de forma independente.** Aprovar uma consolidação não aprova as operações dela. Aprovar uma operação não aprova a consolidação. Uma consolidação rejeitada pode ter operações individualmente aprovadas, e isso não autoriza execução. A tela diz isso no resumo e nos cartões. **Uma etapa futura de execução deverá definir e validar a consistência entre agrupamentos e operações antes de qualquer movimentação;** essa política não existe nesta etapa.
+- **Rejeitar:** sempre possível, inclusive em proposta bloqueada. A justificativa é opcional, com até 500 caracteres.
+- **Mudar de ideia:** uma nova decisão acrescenta um registro, e a última prevalece. Não há como apagar pela tela.
+
+**Quem decide é o motor, a cada pedido.** A janela envia só a seleção, o identificador da proposta, a decisão e a justificativa, com campos desconhecidos recusados. `decideProposal` refaz o plano a partir do inventário revalidado e procura a proposta nele; `createDecisionRecord` é o único caminho para criar um registro e aplica a regra de aprovação. Manipular a janela ou chamar o IPC diretamente não muda o resultado.
+
+**Identidade e invalidação.** Cada decisão guarda `proposalId` e `signature`: HMAC do conteúdo completo da proposta, do inventário autenticado e da versão do planejamento, com subchave própria derivada da chave local (HKDF). HMAC em vez de hash puro para o arquivo sozinho não permitir confirmar nomes por tentativa. A cada prévia, `reconcileDecisions` confere o histórico contra o plano atual:
+
+- assinatura diferente = decisão invalidada (`content-changed`), de aprovação ou de rejeição, e a proposta volta a pendente, com aviso;
+- aprovação de proposta que o motor não considera apta agora = invalidada (`not-approvable`), mesmo com assinatura válida. O estado do motor sempre prevalece.
+
+Decisões não passam de um inventário a outro: o arquivo, os registros, o identificador da proposta e a assinatura dependem do inventário autenticado. Uma nova leitura gera outro inventário e começa sem decisões.
+
+**Persistência.** Um JSON por inventário em `%LOCALAPPDATA%\air-organizer\decisions\<inventário>.json`, fora do repositório e de `output/`, com escrita atômica. Registro: `inventoryId`, `proposalId`, `signature`, `decision`, `decidedAt`, `justification` (opcional), `planning` (`format`, `schemaVersion`, `plannerVersion`, `engineVersion`), `executable: false` e `authorizesChanges: false`. O documento tem selo HMAC. Sem credenciais, nomes nem caminhos; o único texto livre é a justificativa.
+
+**Validação ao carregar.** Formato estrito e selo. Qualquer divergência, inclusive JSON corrompido, HMAC inválido ou edição manual, invalida o arquivo inteiro: nenhuma decisão é aproveitada. Falha de leitura do disco não é tratada como arquivo inválido.
+
+**Histórico inválido.** O arquivo é preservado, a tela avisa e novas aprovações e rejeições ficam bloqueadas no processo principal, só para o inventário afetado. Um novo histórico só começa por `resetDecisionHistory`, com confirmação em diálogo nativo do **processo principal**: por isso uma chamada direta ao IPC só leva à pergunta e não a dispensa, e campos como `confirmed` são recusados. Confirmado, o arquivo é copiado para `<inventário>.invalido-<instante>-<aleatório>.bak`, sem substituir cópias anteriores, e o histórico recomeça válido e vazio, sem importar nada. Cancelado, nada muda. Histórico válido ou ausente não pode ser reiniciado, e inventário sem histórico decide normalmente, sem confirmação.
+
+**Privacidade.** As visões não trazem a justificativa, porque ela pode conter nomes digitados pelo operador: mostram só que existe. O texto sai por `revealDecisionNotes`, junto com a revelação de nomes, e é descartado ao ocultar. Decisões não são exportadas.
+
+**Limites.** O selo protege contra edição sem a chave local, não contra quem tem acesso à chave no mesmo perfil do Windows. Não há identificação de quem decidiu, tela de histórico nem retenção automática; a tela mostra só a contagem de registros por proposta. Aprovações ainda não foram exercitadas com seleções reais (§13). Uma execução futura precisará de contrato próprio e nova revalidação no AIR: uma aprovação registrada aqui não é autorização para ela.
 
 ## 10. Executor supervisionado (somente POC-03)
 
@@ -851,6 +883,8 @@ Entregue: janela Electron com IPC restrito (§5.2); conexão pelo Chrome dedicad
 
 **POC-03B, Incremento A (seleção e prévia na tela, §9.4):** só leitura, sem executor. Validada com dados sintéticos.
 
+**POC-03B, Incremento B (revisão humana e histórico local, §9.5):** grava só decisões locais, sem executor e sem escrita no AIR. Validada com dados sintéticos.
+
 **Pré-requisitos:** autorização da organização e ambiente de teste/homologação preferencialmente, ou cenário de produção explicitamente autorizado; POC-01 e POC-02 aprovadas.
 
 Critérios de aceite:
@@ -926,13 +960,15 @@ Critérios de aceite:
 
 - **ADR-019 — Prévia de movimentações com nomes ocultos (POC-03B, Incremento A):** a tela Planejamento seleciona origem e destino por identificadores opacos, e nomes e caminhos ficam no processo principal até a revelação explícita e confirmada, sem persistir a preferência. Ocultar remove os nomes de seletores, prévias e mensagens. Identificadores valem só para o inventário analisado. A elegibilidade é a do ADR-016, e a avaliação é a do motor do ADR-018. Nada é executado nem gravado (§9.4).
 
+- **ADR-020 — Decisões humanas locais, sem efeito de autorização (POC-03B, Incremento B):** aprovar ou rejeitar registra só a revisão, em JSON local por inventário, fora do repositório, com selo e assinatura HMAC de subchave própria. O processo principal refaz o plano a cada decisão, e o estado do motor prevalece sobre qualquer registro. Decisão vale para o conteúdo exato da proposta e é invalidada se ele mudar. Arquivo inválido é ignorado por inteiro, bloqueia novas decisões e só é substituído depois de confirmação no processo principal, com cópia de recuperação. Consolidação e operações são decididas de forma independente, e a consistência entre elas fica para a etapa de execução. Justificativas ficam ocultas junto com os nomes (§9.5).
+
 ## 18. Próxima ação concreta
 
-**Situação:** a App Base v0.1 está entregue (§5.2, ADR-017), estritamente somente leitura, sobre a POC-01 (leitura e retomada, §7), a POC-02A (diagnóstico, §8.4), a POC-02B.1 (selo, §8.5) e a POC-02B.2 (planejamento não executável, §9.1). A POC-03A (§9.3) foi concluída com validação sintética, sem validação real das propostas (§13). O achado do `return-failed` após paginar está diagnosticado e corrigido (§7.8).
+**Situação:** a App Base v0.1 está entregue (§5.2, ADR-017), estritamente somente leitura, sobre a POC-01 (leitura e retomada, §7), a POC-02A (diagnóstico, §8.4), a POC-02B.1 (selo, §8.5) e a POC-02B.2 (planejamento não executável, §9.1). A POC-03A (§9.3) e os Incrementos A e B da POC-03B (§9.4, §9.5) foram concluídos com validação sintética, sem validação real das propostas (§13). O achado do `return-failed` após paginar está diagnosticado e corrigido (§7.8).
 
 Pendências de validação no AIR real: cada modo de retomada isoladamente e abertura de subpasta em página oculta (README, "Limitações conhecidas"). Decidir sobre o campo "Ir" continua em aberto.
 
-**Próxima etapa:** antes da POC-03B, validar as propostas com seleções reais definidas pelo operador, em memória, sobre um inventário elegível que cubra origem e destino. Depois, a execução da POC-03, seguindo as regras do §9 e do §9.2 e os pré-requisitos da seção POC-03 (§13). Antes, medir com que frequência inventários reais ficam elegíveis para planejamento (§15). `homonyms: 'identify-by-url'` continua desativado, sem nova investigação (§7.5.1). Não implementar nem habilitar `mover.ts` sem a autorização correspondente.
+**Próxima etapa:** validar as propostas e a revisão com seleções reais definidas pelo operador, em memória, sobre um inventário elegível que cubra origem e destino. Depois, a execução da POC-03, seguindo as regras do §9 e do §9.2 e os pré-requisitos da seção POC-03 (§13). Antes, medir com que frequência inventários reais ficam elegíveis para planejamento (§15). `homonyms: 'identify-by-url'` continua desativado, sem nova investigação (§7.5.1). Não implementar nem habilitar `mover.ts` sem a autorização correspondente.
 
 ---
 

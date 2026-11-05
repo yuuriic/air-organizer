@@ -17,14 +17,21 @@ import { assertOutsideRepository } from '../safety/scope-validator.js';
 const HKDF_SALT = 'air-organizer/key-derivation';
 const HKDF_INFO = 'tree-inventory-seal/v1';
 const KEY_ID_LABEL = 'air-organizer/tree-inventory-seal/key-id';
+const DECISIONS_HKDF_INFO = 'movement-decisions/v1';
+const DECISIONS_KEY_ID_LABEL = 'air-organizer/movement-decisions/key-id';
 
-export function inventoryAuthenticator(masterKey: Buffer): InventoryAuthenticator {
-  const subkey = Buffer.from(hkdfSync('sha256', masterKey, HKDF_SALT, HKDF_INFO, 32));
+function derivedAuthenticator(masterKey: Buffer, info: string, keyIdLabel: string): InventoryAuthenticator {
+  const subkey = Buffer.from(hkdfSync('sha256', masterKey, HKDF_SALT, info, 32));
   return {
-    keyId: createHmac('sha256', subkey).update(KEY_ID_LABEL, 'utf8').digest('hex').slice(0, 16),
+    keyId: createHmac('sha256', subkey).update(keyIdLabel, 'utf8').digest('hex').slice(0, 16),
     mac: (message) => createHmac('sha256', subkey).update(message, 'utf8').digest(),
   };
 }
+
+export const inventoryAuthenticator = (masterKey: Buffer): InventoryAuthenticator => derivedAuthenticator(masterKey, HKDF_INFO, KEY_ID_LABEL);
+
+/** Subchave própria das decisões humanas: um selo de inventário nunca serve de selo de decisões. */
+export const decisionAuthenticator = (masterKey: Buffer): InventoryAuthenticator => derivedAuthenticator(masterKey, DECISIONS_HKDF_INFO, DECISIONS_KEY_ID_LABEL);
 
 export type KeyUnavailable = 'missing' | 'invalid' | 'unreadable';
 
@@ -37,6 +44,17 @@ export async function openVerifyingAuthenticator(
   keyFile: string,
   repositoryDir?: string,
 ): Promise<{ authenticator: InventoryAuthenticator } | { unavailable: KeyUnavailable }> {
+  const key = await readMasterKey(keyFile, repositoryDir);
+  return 'key' in key ? { authenticator: inventoryAuthenticator(key.key) } : key;
+}
+
+/** Nunca cria a chave: sem ela, não há decisões a conferir nem a gravar. */
+export async function openDecisionAuthenticator(keyFile: string, repositoryDir?: string): Promise<InventoryAuthenticator | undefined> {
+  const key = await readMasterKey(keyFile, repositoryDir);
+  return 'key' in key ? decisionAuthenticator(key.key) : undefined;
+}
+
+async function readMasterKey(keyFile: string, repositoryDir?: string): Promise<{ key: Buffer } | { unavailable: KeyUnavailable }> {
   try {
     assertOutsideRepository([keyFile], repositoryDir);
   } catch {
@@ -49,5 +67,5 @@ export async function openVerifyingAuthenticator(
     return { unavailable: (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : 'unreadable' };
   }
   if (!/^[0-9a-f]{64}$/.test(hex)) return { unavailable: 'invalid' };
-  return { authenticator: inventoryAuthenticator(Buffer.from(hex, 'hex')) };
+  return { key: Buffer.from(hex, 'hex') };
 }

@@ -427,6 +427,180 @@ describe.runIf(process.platform === 'win32')('fluxo pela janela do aplicativo (d
     await expectHidden();
   }, TIMEOUT);
 
+  it('revisão humana: aprova o que está apto, recusa o bloqueado, inclusive pelo IPC, e recupera ao reabrir', async () => {
+    const CONFLICT_TREE = dir('root', 'Raizfic', [
+      dir('o', 'Fontefic', [dir('o25', 'Ciclofic', [{ id: 'a', name: 'ata.pdf', type: 'file' }, { id: 'b', name: 'lista.pdf', type: 'file' }])]),
+      dir('d', 'Alvofic', [dir('d25', 'Ciclofic', [{ id: 'e', name: 'ata.pdf', type: 'file' }])]),
+    ]);
+    const PRIVATE = ['Fontefic', 'Alvofic', 'Ciclofic', 'ata.pdf', 'lista.pdf', 'Raizfic'];
+    const NOTE = 'Motivo ficticio 77';
+    await start({ root: CONFLICT_TREE, pageSize: 30 });
+    await openChrome();
+    await go('Leitura');
+    await page.locator('#op-client').fill('Cliente Sintético');
+    await page.locator('#op-sector').fill('Setor Sintético');
+    await fill('tree', WIDE);
+    await page.locator('#start-tree').click();
+    await confirm();
+    await page.locator('#tree-result .notice').waitFor({ timeout: WAIT });
+    await page.getByRole('button', { name: 'Gravar inventário detalhado' }).last().click();
+    await confirm();
+    await page.locator('#message.ok').waitFor({ timeout: WAIT });
+
+    const analyze = async () => {
+      await go('Planejamento');
+      await page.locator('#plan-select option[value^="inv-"]').first().waitFor({ state: 'attached', timeout: WAIT });
+      await page.locator('#move-load:not([disabled])').click();
+      await page.locator('#move-picker:not([hidden])').waitFor({ timeout: WAIT });
+    };
+    const reveal = async () => {
+      await page.getByRole('button', { name: 'Revelar nomes da seleção' }).click();
+      await confirm();
+      await page.getByRole('button', { name: 'Ocultar nomes' }).waitFor({ timeout: WAIT });
+    };
+    const hide = async () => {
+      await page.getByRole('button', { name: 'Ocultar nomes' }).click();
+      await page.getByRole('button', { name: 'Revelar nomes da seleção' }).waitFor({ timeout: WAIT });
+    };
+    const expectHidden = async () => {
+      const html = await page.locator('#move-result').evaluate((node) => node.outerHTML);
+      for (const name of [...PRIVATE, NOTE]) expect(html).not.toContain(name);
+    };
+    await analyze();
+    await reveal();
+    const listed = await page.locator('#move-source option').evaluateAll((list) => list.map((o) => ({ value: (o as HTMLOptionElement).value, text: o.textContent ?? '' })));
+    const origem = listed.findIndex((o) => o.text.includes('Fontefic'));
+    const source = listed.slice(origem).find((o) => o.text.includes('Ciclofic'))!.value;
+    const destination = listed.find((o) => o.text.includes('Alvofic'))!.value;
+    await hide();
+    const generate = async () => {
+      await page.locator('#move-source').selectOption(source);
+      await page.locator('#move-destination').selectOption(destination);
+      await page.locator('input[name="move-mode"][value="folder"]').check();
+      await page.locator('#move-generate').click();
+      await page.locator('#move-decisions').waitFor({ timeout: WAIT });
+    };
+    await generate();
+
+    const cards = page.locator('#move-result article.card');
+    const partial = cards.first();
+    const blocked = page.locator('#move-result article.card[data-state="blocked"]');
+    const ready = page.locator('#move-result article.card[data-state="ready-for-review"]').last();
+    expect(await text('#move-decisions')).toBe('Revisão humana: 0 aprovada(s) · 0 rejeitada(s) · 1 pendente(s) · 2 sem aprovação possível');
+
+    // Sem botão de aprovar onde não pode, com o motivo; a rejeição continua disponível.
+    for (const card of [partial, blocked]) {
+      expect(await card.locator('.decide-approved').count()).toBe(0);
+      expect(await card.locator('.decide-rejected').count()).toBe(1);
+      expect(await card.locator('.decision-refusal').innerText()).toMatch(/^Aprovação não permitida: /);
+    }
+    expect(await partial.locator('.decision-refusal').innerText()).toContain('aprove apenas as operações aptas');
+    expect(await blocked.locator('.decision-refusal').innerText()).toContain('bloqueada');
+    expect(await ready.locator('.decide-approved').count()).toBe(1);
+    expect(await ready.locator('.decision-refusal').count()).toBe(0);
+    const actions = (await page.locator('#planning button').allInnerTexts()).join(' | ');
+    expect(actions).not.toMatch(/mover|excluir|apagar|renomear|mesclar|executar|aplicar/i);
+
+    // Manipular a janela não adianta: o processo principal decide pelo motor.
+    const inventoryId = await page.locator('#plan-select').inputValue();
+    const selection = { inventoryId, source, destination, mode: 'folder' };
+    const viaIpc = (payload: unknown) => page.evaluate((p) => (window as unknown as { airOrganizer: { decideProposal(a: unknown): Promise<{ ok: boolean; error?: { code: string } }> } }).airOrganizer.decideProposal(p), payload);
+    const blockedId = await blocked.locator('.refs').innerText();
+    const partialId = await partial.locator('.refs').innerText();
+    expect(await viaIpc({ selection, proposalId: blockedId, decision: 'approved' })).toMatchObject({ ok: false, error: { code: 'decision-refused' } });
+    expect(await viaIpc({ selection, proposalId: partialId, decision: 'approved' })).toMatchObject({ ok: false, error: { code: 'decision-refused' } });
+    expect(await viaIpc({ selection, proposalId: blockedId, decision: 'approved', state: 'ready-for-review' })).toMatchObject({ ok: false, error: { code: 'invalid-input' } });
+    const decisions = path.join(base, 'local', 'air-organizer', 'decisions');
+    expect(await readdir(decisions).catch(() => [])).toEqual([]);
+
+    // Aprova a operação apta, com justificativa; a justificativa não aparece com nomes ocultos.
+    const readyId = await ready.locator('.refs').innerText();
+    await ready.locator('.decision-note').fill(NOTE);
+    await ready.locator('.decide-approved').click();
+    await page.locator('#move-decisions', { hasText: '1 aprovada(s)' }).waitFor({ timeout: WAIT });
+    expect(await text('#message')).toContain('Nada foi executado no AIR');
+    const approved = page.locator('#move-result article.card', { hasText: readyId });
+    expect(await approved.locator('.tag.state-approved').innerText()).toContain('não autoriza execução');
+    expect(await approved.locator('.tag').allInnerTexts()).toContain('Não executável');
+    expect(await approved.locator('.decision-justification').innerText()).toContain('oculta');
+    await expectHidden();
+
+    await partial.locator('.decide-rejected').click();
+    await page.locator('#move-decisions', { hasText: '1 rejeitada(s)' }).waitFor({ timeout: WAIT });
+    expect(await text('#move-decisions')).toBe('Revisão humana: 1 aprovada(s) · 1 rejeitada(s) · 0 pendente(s) · 1 sem aprovação possível');
+
+    // Gravado fora de output/, sem nomes.
+    const saved = await readdir(decisions);
+    expect(saved).toHaveLength(1);
+    const content = await readFile(path.join(decisions, saved[0]!), 'utf-8');
+    for (const name of PRIVATE) expect(content).not.toContain(name);
+    expect(JSON.parse(content).decisions.map((r: { decision: string; executable: boolean }) => [r.decision, r.executable])).toEqual([['approved', false], ['rejected', false]]);
+    for (const f of await files()) expect(f).not.toContain('decisions');
+
+    // Reabre: as decisões voltam, ainda com nomes e justificativa ocultos.
+    await app!.close();
+    await launchApp({ root: CONFLICT_TREE, pageSize: 30 });
+    await analyze();
+    await generate();
+    expect(await text('#move-decisions')).toBe('Revisão humana: 1 aprovada(s) · 1 rejeitada(s) · 0 pendente(s) · 1 sem aprovação possível');
+    await expectHidden();
+    const recovered = page.locator('#move-result article.card', { hasText: readyId });
+    expect(await recovered.locator('.tag.state-approved').count()).toBe(1);
+
+    // A justificativa só aparece com a revelação, e sai ao ocultar.
+    await reveal();
+    expect(await recovered.locator('.decision-justification').innerText()).toBe(`Justificativa: ${NOTE}`);
+    await hide();
+    await expectHidden();
+    // Independência escrita na tela: resumo, consolidação e operação.
+    expect(await text('#move-decisions-independence')).toContain('aprovar uma não aprova a outra');
+    expect(await text('#move-decisions-independence')).toContain('uma consolidação rejeitada pode ter operações aprovadas');
+    // A janela foi reaberta: os localizadores anteriores eram da página fechada.
+    const cardsNow = page.locator('#move-result article.card');
+    expect(await cardsNow.first().locator('.decision-independence').innerText()).toContain('não aprova as operações dela');
+    expect(await recovered.locator('.decision-independence').innerText()).toContain('não aprova a consolidação dela');
+
+    // Histórico adulterado: avisa, preserva, bloqueia, e só recomeça com a confirmação do processo principal.
+    const historyFile = path.join(decisions, saved[0]!);
+    const tampered = (await readFile(historyFile, 'utf-8')).replace('"approved"', '"rejected"');
+    await writeFile(historyFile, tampered);
+    await page.locator('#move-generate').click();
+    await page.locator('#move-decisions-invalid').waitFor({ timeout: WAIT });
+    expect(await text('#move-decisions')).toBe('Revisão humana: 0 aprovada(s) · 0 rejeitada(s) · 1 pendente(s) · 2 sem aprovação possível');
+    expect(await page.locator('#move-result .decision button').count()).toBe(0);
+    expect(await page.locator('#move-result .decision-note').count()).toBe(0);
+    expect(await page.locator('#move-result .decision-blocked').count()).toBe(await cardsNow.count());
+
+    const reopened = { inventoryId: await page.locator('#plan-select').inputValue(), source, destination, mode: 'folder' };
+    for (const decision of ['approved', 'rejected']) expect(await viaIpc({ selection: reopened, proposalId: readyId, decision })).toMatchObject({ ok: false, error: { code: 'decision-history-invalid' } });
+    expect(await viaIpc({ selection: reopened, proposalId: readyId, decision: 'approved', confirmed: true })).toMatchObject({ ok: false, error: { code: 'invalid-input' } });
+
+    const answer = (choice: number) => app!.evaluate(({ dialog }, value) => {
+      (dialog as unknown as { showMessageBoxSync: () => number }).showMessageBoxSync = () => value;
+    }, choice);
+    const resetViaIpc = (payload: unknown) => page.evaluate((p) => (window as unknown as { airOrganizer: { resetDecisionHistory(a: unknown): Promise<unknown> } }).airOrganizer.resetDecisionHistory(p), payload);
+    // O processo principal responde "Cancelar": nem a tela nem o IPC direto reiniciam.
+    await answer(0);
+    await page.locator('#move-history-reset').click();
+    await page.locator('#message.warn').waitFor({ timeout: WAIT });
+    expect(await resetViaIpc(reopened.inventoryId)).toEqual({ ok: true, data: { outcome: 'cancelled' } });
+    expect(await resetViaIpc({ inventoryId: reopened.inventoryId, confirmed: true })).toMatchObject({ ok: false, error: { code: 'invalid-input' } });
+    expect(await readFile(historyFile, 'utf-8')).toBe(tampered);
+    expect(await readdir(decisions)).toEqual(saved);
+
+    await answer(1);
+    await page.locator('#move-history-reset').click();
+    await page.locator('#move-decisions-invalid').waitFor({ state: 'detached', timeout: WAIT });
+    expect(await text('#message')).toContain('não foram importadas');
+    expect(await text('#move-decisions')).toBe('Revisão humana: 0 aprovada(s) · 0 rejeitada(s) · 1 pendente(s) · 2 sem aprovação possível');
+    const after = await readdir(decisions);
+    expect(after).toHaveLength(2);
+    expect(await readFile(path.join(decisions, after.find((n) => n.includes('.invalido-'))!), 'utf-8')).toBe(tampered);
+    expect(JSON.parse(await readFile(historyFile, 'utf-8')).decisions).toEqual([]);
+    await page.locator('#move-result article.card', { hasText: readyId }).locator('.decide-approved').click();
+    await page.locator('#move-decisions', { hasText: '1 aprovada(s)' }).waitFor({ timeout: WAIT });
+  }, TIMEOUT);
+
   it('parada controlada: Chrome segue aberto, leitura parcial, plano recusado; retomada VERIFICADA completa e planejável', async () => {
     await start({ root: TREE, pageSize: 30, renderDelayMs: 350 });
     await openChrome();

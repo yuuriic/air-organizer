@@ -20,12 +20,20 @@ const GROUP_LABEL: Record<NonNullable<ProposalPreview['group']>['status'], strin
   empty: 'sem conteúdo a consolidar',
 };
 const MODE_LABEL: Record<string, string> = { folder: 'Levar a pasta para dentro do destino', 'folder-contents': 'Consolidar o conteúdo da pasta no destino' };
-const REVEAL_WARNING = ['A revelação pode mostrar nomes de pastas e arquivos, que podem conter dados pessoais ou sensíveis.', 'Eles ficam visíveis nesta janela até você ocultá-los. Não compartilhe a tela sem autorização.'];
+const REVEAL_WARNING = ['A revelação pode mostrar nomes de pastas e arquivos e as justificativas registradas, que podem conter dados pessoais ou sensíveis.', 'Eles ficam visíveis nesta janela até você ocultá-los. Não compartilhe a tela sem autorização.'];
 /** Texto e símbolo, além da cor: o estado não depende só da aparência. */
 const STATE_TAG: Record<ProposalPreview['state'], { className: string; symbol: string }> = {
   generated: { className: 'tag', symbol: '' },
   blocked: { className: 'tag state-blocked', symbol: '⚠ ' },
   'ready-for-review': { className: 'tag state-ready', symbol: '○ ' },
+};
+const DECISION_TAG: Record<'approved' | 'rejected', { className: string; text: string }> = {
+  approved: { className: 'tag state-approved', text: '✓ Aprovada na revisão (não autoriza execução)' },
+  rejected: { className: 'tag state-rejected', text: '✕ Rejeitada na revisão' },
+};
+const INVALIDATED_TEXT: Record<NonNullable<ProposalPreview['decision']['invalidated']>, string> = {
+  'content-changed': 'A proposta mudou depois da última decisão: aquela decisão não vale mais. Revise de novo.',
+  'not-approvable': 'A aprovação registrada não vale: o motor não considera esta proposta apta agora.',
 };
 const IDENTITY_NOTE: Record<SelectionNode['identity'], string> = { observed: '', derived: ' · caminho derivado', unavailable: ' · sem caminho comprovável', ambiguous: ' · identidade ambígua' };
 
@@ -34,6 +42,10 @@ let preview: MovementPreviewView | undefined;
 /** A seleção que gerou a prévia exibida, guardada no pedido: não acompanha mudanças posteriores. */
 let generatedFrom: { inventory: string; source: string; destination: string; mode: string | undefined } | undefined;
 let names: Record<string, string> | undefined;
+/** Justificativas podem conter nomes: só existem aqui enquanto os nomes estão revelados. */
+let notes: Record<string, string> = {};
+/** Texto ainda não enviado de cada proposta: redesenhar a prévia não apaga o que foi digitado. */
+const drafts = new Map<string, string>();
 let epoch = 0;
 
 const nodes = () => inspection?.tree ?? [];
@@ -92,7 +104,9 @@ function renderCard(p: ProposalPreview): HTMLElement {
       // O motor só produz `executable: false`; a tela reflete o campo, sem presumir.
       el('span', { class: 'tag' }, p.executable === false ? 'Não executável' : 'Inválida'),
       // Só o que de fato pode ser revisado; bloqueada não está aguardando revisão.
-      ...(p.state === 'ready-for-review' ? [el('span', { class: 'tag' }, 'Pendente de revisão')] : []),
+      ...(p.decision.status === 'pending' && p.decision.approvable ? [el('span', { class: 'tag' }, 'Pendente de revisão')] : []),
+      ...(p.decision.status !== 'pending' ? [el('span', { class: DECISION_TAG[p.decision.status].className }, DECISION_TAG[p.decision.status].text)] : []),
+      ...(p.decision.invalidated ? [el('span', { class: 'tag state-partial' }, '⚠ Decisão anterior invalidada')] : []),
       ...(p.derivedPath ? [el('span', { class: 'tag' }, 'Caminho derivado')] : []),
     ),
     el('p', { class: 'refs' }, p.id),
@@ -107,7 +121,99 @@ function renderCard(p: ProposalPreview): HTMLElement {
     ...bullets('Conflitos', p.conflicts.map((c) => c.message)),
     ...bullets('Bloqueios', p.blockers.map((b) => b.message)),
     ...bullets('Alertas', p.alerts),
+    renderDecision(p),
   );
+}
+
+function renderDecision(p: ProposalPreview): HTMLElement {
+  const d = p.decision;
+  const blocked = preview?.decisions.file === 'invalid';
+  const input = el('textarea', { class: 'decision-note', rows: '2', maxlength: '500' });
+  input.value = drafts.get(p.id) ?? '';
+  input.addEventListener('input', () => drafts.set(p.id, input.value));
+  const button = (decision: 'approved' | 'rejected', text: string) => {
+    const b = el('button', { type: 'button', class: `decide-${decision}` }, text);
+    b.addEventListener('click', () => void decide(p.id, decision));
+    return b;
+  };
+  const recorded = d.status === 'pending' ? undefined : `Decisão registrada em ${d.decidedAt}.`;
+  const note = !d.hasJustification ? undefined : names ? `Justificativa: ${notes[p.id] ?? '(indisponível)'}` : 'Justificativa registrada (oculta: revele os nomes para ver).';
+  return el(
+    'section',
+    { class: 'decision', 'data-decision': d.status },
+    el('h4', {}, 'Revisão humana'),
+    ...(recorded ? [el('p', {}, recorded)] : []),
+    ...(note ? [el('p', { class: 'decision-justification' }, note)] : []),
+    ...(d.invalidated ? [el('p', { class: 'decision-invalidated' }, INVALIDATED_TEXT[d.invalidated])] : []),
+    ...(d.approvalRefusal ? [el('p', { class: 'decision-refusal' }, `Aprovação não permitida: ${d.approvalRefusal}`)] : []),
+    ...(p.kind === 'consolidate-folder' ? [el('p', { class: 'muted decision-independence' }, 'Aprovar esta consolidação não aprova as operações dela, e rejeitá-la não muda as decisões delas. Nada disso autoriza execução.')] : []),
+    ...(p.parentOperation ? [el('p', { class: 'muted decision-independence' }, 'Aprovar esta operação não aprova a consolidação dela. Mesmo com a consolidação rejeitada, esta decisão continua separada e não autoriza execução.')] : []),
+    ...(d.history > 1 ? [el('p', { class: 'muted' }, `${d.history} registros no histórico desta proposta.`)] : []),
+    ...(blocked
+      ? [el('p', { class: 'decision-blocked' }, 'Novas decisões bloqueadas: o histórico local deste inventário é inválido.')]
+      : [el('label', { class: 'field' }, 'Justificativa (opcional; evite nomes de pessoas e documentos)', input), el('div', { class: 'actions' }, ...(d.approvable ? [button('approved', 'Aprovar')] : []), button('rejected', 'Rejeitar'))]),
+  );
+}
+
+/** A decisão vale só para a prévia exibida; resposta depois de mudar a seleção é descartada. */
+async function decide(proposalId: string, decision: 'approved' | 'rejected'): Promise<void> {
+  if (!inspection || !generatedFrom) return;
+  clearMessage();
+  const requested = epoch;
+  const inventoryId = inspection.id;
+  const buttons = () => document.querySelectorAll<HTMLButtonElement>('#move-result .decision button');
+  for (const b of buttons()) b.disabled = true;
+  const { source, destination, mode } = generatedFrom;
+  const justification = drafts.get(proposalId)?.trim();
+  const view = await call('decideProposal', { selection: { inventoryId, source, destination, ...(mode ? { mode } : {}) }, proposalId, decision, ...(justification ? { justification } : {}) }, unlessStale(requested));
+  if (requested !== epoch) return;
+  if (!view) {
+    for (const b of buttons()) b.disabled = false;
+    return;
+  }
+  preview = view;
+  drafts.delete(proposalId);
+  if (names) {
+    const refreshed = await call('revealDecisionNotes', inventoryId, unlessStale(requested));
+    if (requested !== epoch) return;
+    if (refreshed) notes = refreshed;
+  }
+  renderPreview();
+  showMessage('ok', decision === 'approved' ? 'Aprovação registrada localmente. Nada foi executado no AIR.' : 'Rejeição registrada localmente. Nada foi executado no AIR.');
+}
+
+/** A confirmação é do processo principal: aqui só se pede o início e se redesenha com o resultado. */
+async function resetHistory(): Promise<void> {
+  if (!inspection || !generatedFrom) return;
+  clearMessage();
+  const requested = epoch;
+  const inventoryId = inspection.id;
+  const { source, destination, mode } = generatedFrom;
+  const result = await call('resetDecisionHistory', inventoryId, unlessStale(requested));
+  if (!result || requested !== epoch) return;
+  if (result.outcome === 'cancelled') {
+    showMessage('warn', 'Nada foi alterado: o histórico inválido continua guardado, e as decisões seguem bloqueadas.');
+    return;
+  }
+  const view = await call('previewProposals', { inventoryId, source, destination, ...(mode ? { mode } : {}) }, unlessStale(requested));
+  if (!view || requested !== epoch) return;
+  preview = view;
+  notes = {};
+  renderPreview();
+  showMessage('ok', 'Novo histórico iniciado, vazio. O anterior foi guardado como cópia de recuperação, e as decisões dele não foram importadas.');
+}
+
+function renderDecisionSummary(): HTMLElement[] {
+  const d = preview!.decisions;
+  const resetButton = el('button', { id: 'move-history-reset', type: 'button' }, 'Iniciar novo histórico');
+  resetButton.addEventListener('click', () => void resetHistory());
+  return [
+    el('p', { id: 'move-decisions' }, `Revisão humana: ${d.approved} aprovada(s) · ${d.rejected} rejeitada(s) · ${d.pending} pendente(s) · ${d.notApprovable} sem aprovação possível`),
+    ...(d.invalidated ? [el('p', { class: 'notice warn' }, `⚠ ${d.invalidated} decisão(ões) anterior(es) invalidada(s): a proposta mudou ou não está apta. Revise de novo.`)] : []),
+    ...(d.file === 'invalid' ? [el('p', { id: 'move-decisions-invalid', class: 'notice error' }, 'O histórico local de decisões deste inventário não pôde ser validado e foi ignorado: nenhuma decisão anterior foi aproveitada, e novas decisões estão bloqueadas. O arquivo foi preservado. Para continuar, inicie um novo histórico: o atual será guardado como cópia de recuperação, sem importar nada dele.'), el('div', { class: 'actions' }, resetButton)] : []),
+    el('p', { class: 'muted' }, 'Decisões ficam só neste computador e registram apenas a revisão: não executam nem autorizam nada no AIR.'),
+    el('p', { id: 'move-decisions-independence', class: 'muted' }, 'Consolidações e operações são revisadas de forma independente: aprovar uma não aprova a outra, e uma consolidação rejeitada pode ter operações aprovadas. Uma etapa futura de execução terá de validar a consistência entre elas antes de qualquer movimentação.'),
+  ];
 }
 
 function renderOrderItem(id: string): HTMLElement {
@@ -154,6 +260,7 @@ function renderPreview(): void {
             : `Prévia: ${s.byState['ready-for-review']} apta(s) para revisão · 0 bloqueada(s) · todas NÃO EXECUTÁVEIS`,
       ),
       renderSelectionBox(),
+      ...(preview.accepted ? renderDecisionSummary() : []),
       facts([
         ['Total de propostas', String(s.proposals)],
         ['Prontas para revisão', String(s.byState['ready-for-review'])],
@@ -206,6 +313,8 @@ function reset(): void {
   preview = undefined;
   generatedFrom = undefined;
   names = undefined;
+  notes = {};
+  drafts.clear();
   for (const radio of document.querySelectorAll<HTMLInputElement>('input[name="move-mode"]')) radio.checked = false;
   sourceSelect().replaceChildren();
   destinationSelect().replaceChildren();
@@ -218,6 +327,7 @@ function invalidatePreview(): void {
   epoch++;
   preview = undefined;
   generatedFrom = undefined;
+  drafts.clear();
   renderPreview();
 }
 
@@ -249,6 +359,7 @@ export function initMovements(): void {
   byId('move-names').addEventListener('click', async () => {
     if (names) {
       names = undefined;
+      notes = {};
       clearMessage();
     } else {
       if (!inspection) return;
@@ -257,7 +368,10 @@ export function initMovements(): void {
       const revealed = await call('revealSelectionNames', inspection.id, unlessStale(requested));
       // Revelar não muda a seleção, mas trocar de inventário durante o pedido descarta a resposta.
       if (!revealed || requested !== epoch) return;
+      const revealedNotes = await call('revealDecisionNotes', inspection.id, unlessStale(requested));
+      if (!revealedNotes || requested !== epoch) return;
       names = revealed;
+      notes = revealedNotes;
     }
     renderInspection();
     renderPreview();

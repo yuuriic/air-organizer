@@ -29,6 +29,9 @@ export const API_METHODS = [
   'inspectInventory',
   'revealSelectionNames',
   'previewProposals',
+  'decideProposal',
+  'revealDecisionNotes',
+  'resetDecisionHistory',
   'getSettings',
   'saveSettings',
 ] as const;
