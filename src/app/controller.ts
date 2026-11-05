@@ -8,18 +8,20 @@ import { detectEnvironment, type OperatorContext } from '../air/navigator.js';
 import { ListingNotFoundError } from '../air/reader.js';
 import { resolveInstanceUrl } from '../cli/args.js';
 import { ResumeRejectedError, type CheckpointState } from '../core/checkpoint.js';
+import type { MovementPlan } from '../core/movement-planner.js';
 import { redactPlan, type OrganizationPlan, type PlanProposal } from '../core/organization-planner.js';
 import { formatFinding, redactReport, type StructuralReport } from '../core/structural-diagnostics.js';
 import { formatTreeEvent } from '../core/tree-scanner.js';
 import { OpenRefusedError, SafetyViolation, assertReadOnlyMode, validateAnalysisScope } from '../safety/scope-validator.js';
 import { CheckpointStore, defaultCheckpointLocations, type CheckpointEntry, type CheckpointSession } from '../storage/checkpoints.js';
-import { DEFAULT_OUTPUT_DIR, displayPath, exportInventoryResult, newRunId } from '../storage/export.js';
+import { DEFAULT_OUTPUT_DIR, displayPath, exportInventoryResult, inventoryLabel, newRunId } from '../storage/export.js';
 import { describeLocalFailure, exportOrganizationPlan, exportStructuralReport, listTreeInventories } from '../storage/inventory-files.js';
-import type { Inventory, ResumeMode, TreeLimits, TreeProgress, TreeResult } from '../types/inventory.js';
+import type { Inventory, ResumeMode, TreeInventoryExport, TreeLimits, TreeProgress, TreeResult } from '../types/inventory.js';
 import { DedicatedChromeSession, type ChromeStatus } from './connection.js';
 import { describePaging, readConnectionSnapshot, readFolderInventory } from './folder-operations.js';
 import { COMPLETENESS_LABEL, ELIGIBILITY_LABEL, MODE_LABEL, STATUS_LABEL, coverageLines, describeLimits, integrityLabel, reasonLabel, treeSummaryLines } from './labels.js';
-import { diagnoseInventory, planInventory } from './local-analysis.js';
+import { diagnoseInventory, inspectInventoryBasis, planInventory, planInventoryMovements } from './local-analysis.js';
+import { MAX_SELECTION_NODES, blockingReasonLines, buildSelectionTree, issueCategories, parseInventoryId, parsePreviewRequest, proposalPreviews, selectionFrom, type ProposalPreview, type SelectionNode, type SelectionTree } from './movement-review.js';
 import { operationalConfig } from './runtime.js';
 import { applySettings, loadSettings, lockedFields, saveSettings, validateSettings, type SettingField, type Settings } from './settings.js';
 import { TREE_DEFAULTS, exportTreeRun, matchResumableRuns, pendingFolders, runTreeScan, type TreeRun } from './tree-run.js';
@@ -71,6 +73,32 @@ export type PlanView = {
   proposals: PlanProposal[];
   written: string[];
   hasNames: boolean;
+};
+/** Sem nomes, caminhos nem URLs: `tree` só tem identificadores e existe só em inventário elegível. */
+export type MovementInspectionView = {
+  id: string;
+  label: string;
+  finishedAt: string;
+  readMode: string;
+  completeness?: string;
+  integrity: string;
+  eligible: boolean;
+  eligibility: string;
+  reasons: string[];
+  counts?: { folders: number; files: number };
+  tree?: SelectionNode[];
+};
+export type MovementPreviewView = {
+  accepted: boolean;
+  executable: false;
+  authorizesChanges: false;
+  reasons: string[];
+  notices: string[];
+  summary: MovementPlan['summary'];
+  categories: { conflicts: Record<string, number>; blockers: Record<string, number> };
+  blockingReasons: string[];
+  safeOrder: string[];
+  proposals: ProposalPreview[];
 };
 export type NamesView = Array<{ id: string; title: string; folders: Array<{ ref: string; label: string }>; details: string[] }>;
 export type SettingsView = {
@@ -141,6 +169,8 @@ export class AppController {
   private resumable = new Map<string, CheckpointEntry>();
   private lastReport: { report: StructuralReport; file: string } | undefined;
   private lastPlan: { plan: OrganizationPlan; file: string } | undefined;
+  /** Inventário aberto para seleção. Os nomes ficam aqui, no processo principal, e só em memória. */
+  private selection: { inventoryId: string; authenticatedId: string; tree: SelectionTree } | undefined;
 
   constructor(private readonly deps: ControllerDeps) {
     this.env = deps.env ?? process.env;
@@ -543,7 +573,7 @@ export class AppController {
     // Identificador estável: um arquivo novo na lista não faz um identificador antigo apontar para outro inventário.
     const idOf = (file: string) => `inv-${createHash('sha256').update(file, 'utf8').digest('hex').slice(0, 16)}`;
     this.inventories = new Map(found.map((entry) => [idOf(entry.file), entry.file]));
-    return found.map((entry) => ({ id: idOf(entry.file), label: displayPath(entry.file, this.outputDir), status: entry.status ?? '?', finishedAt: entry.finishedAt ?? '?' }));
+    return found.map((entry) => ({ id: idOf(entry.file), label: inventoryLabel(entry.file, this.outputDir), status: entry.status ?? '?', finishedAt: entry.finishedAt ?? '?' }));
   }
 
   /** A interface só conhece identificadores; o caminho nunca vem dela. */
@@ -644,6 +674,75 @@ export class AppController {
   async exportPlanDetailed(): Promise<string[]> {
     if (!this.lastPlan) throw new AppError('no-result', 'Nenhum plano nesta sessão.');
     return (await exportOrganizationPlan(this.lastPlan.plan, this.lastPlan.file, { detailed: true }, this.outputDir)).map((f) => displayPath(f, this.outputDir));
+  }
+
+  /* ───────────── Prévia de movimentações (POC-03B): nada é executado nem gravado ───────────── */
+
+  /** Elegibilidade pelo critério do planejamento. Só inventário elegível abre a seleção. */
+  inspectInventory(input: unknown): Promise<MovementInspectionView> {
+    return this.exclusive('planning', async () => {
+      this.selection = undefined;
+      const inventoryId = parseInventoryId(input);
+      const file = this.inventoryFile(inventoryId);
+      const { input: doc, plan, keyUnavailable } = await inspectInventoryBasis(file, this.localOptions());
+      const v = plan.validation;
+      const eligible = v.status === 'accepted' && plan.source.inventoryId !== undefined;
+      // Documento recusado na estrutura não é confiável nem para contar.
+      const inv = v.eligibility.status === 'rejected' ? undefined : (doc as TreeInventoryExport);
+      const tree = eligible ? buildSelectionTree(inv!) : undefined;
+      if (tree && tree.nodes.length > MAX_SELECTION_NODES) throw new AppError('inventory-too-large', 'Este inventário tem itens demais para a seleção nesta tela.');
+      if (tree) this.selection = { inventoryId, authenticatedId: plan.source.inventoryId!, tree };
+      return {
+        id: inventoryId,
+        label: inventoryLabel(file, this.outputDir),
+        finishedAt: inv?.finishedAt ?? '?',
+        readMode: !inv ? 'não informado' : inv.resume ? `retomada ${MODE_LABEL[inv.resume.mode]}` : 'leitura direta, sem retomada',
+        ...(v.completeness ? { completeness: COMPLETENESS_LABEL[v.completeness.status] } : {}),
+        integrity: integrityLabel(v, keyUnavailable),
+        eligible,
+        eligibility: eligible ? ELIGIBILITY_LABEL['planning-eligible'] : 'NÃO ELEGÍVEL: este inventário não pode gerar propostas de movimentação.',
+        reasons: v.reasons.map(reasonLabel),
+        ...(inv ? { counts: { folders: inv.folders.length, files: inv.folders.reduce((sum, f) => sum + f.items.filter((i) => i.kind === 'file').length, 0) } } : {}),
+        ...(tree ? { tree: tree.nodes } : {}),
+      };
+    });
+  }
+
+  /** Só o inventário aberto para seleção: identificadores de um nunca valem para outro. */
+  private openSelection(inventoryId: unknown) {
+    if (!this.selection || this.selection.inventoryId !== inventoryId) throw new InvalidInput('Analise este inventário antes de selecionar a origem e o destino.');
+    return this.selection;
+  }
+
+  /** Só depois de ação explícita na janela. Identificador → nome; não é registrado nem persistido. */
+  revealSelectionNames(input: unknown): Record<string, string> {
+    return this.openSelection(parseInventoryId(input)).tree.names;
+  }
+
+  previewProposals(input: unknown): Promise<MovementPreviewView> {
+    return this.exclusive('planning', async () => {
+      const request = parsePreviewRequest(input);
+      const selection = this.openSelection(request.inventoryId);
+      const movement = selectionFrom(selection.tree, request);
+      // O motor relê e revalida o inventário; os identificadores só valem para o arquivo em que foram criados.
+      const { plan } = await planInventoryMovements(this.inventoryFile(request.inventoryId), { selections: [movement] }, this.localOptions());
+      if (plan.validation.status === 'accepted' && plan.source.inventoryId !== selection.authenticatedId) {
+        this.selection = undefined;
+        throw new AppError('inventory-changed', 'O inventário mudou desde a análise. Analise-o de novo antes de selecionar.');
+      }
+      return {
+        accepted: plan.validation.status === 'accepted',
+        executable: plan.executable,
+        authorizesChanges: plan.authorizesChanges,
+        reasons: plan.validation.reasons.map(reasonLabel),
+        notices: plan.notices,
+        summary: plan.summary,
+        categories: issueCategories(plan),
+        blockingReasons: blockingReasonLines(plan),
+        safeOrder: plan.safeOrder,
+        proposals: proposalPreviews(plan, selection.tree),
+      };
+    });
   }
 
   /* ───────────── Configurações ───────────── */

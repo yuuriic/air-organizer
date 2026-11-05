@@ -88,6 +88,19 @@ export function displayPath(file: string, outputDir = DEFAULT_OUTPUT_DIR): strin
   return [outputDir, '*', '*', parts[2], parts[3]].join('/');
 }
 
+/** Pasta de execução como a ferramenta grava: data e sufixos hexadecimais, sem texto livre. */
+const GENERATED_RUN = /^\d{4}-\d{2}-\d{2}t\d{2}-\d{2}-\d{2}-\d{3}z(-[0-9a-f]+)+$/i;
+
+/**
+ * Rótulo de um inventário para a tela, antes de qualquer revelação de nomes. Uma pasta renomeada à mão
+ * pode conter nomes: o que foge do formato gerado pela ferramenta é mascarado.
+ */
+export function inventoryLabel(file: string, outputDir = DEFAULT_OUTPUT_DIR): string {
+  const parts = path.relative(path.resolve(outputDir), file).split(path.sep);
+  if (parts.length !== 4) return '(caminho omitido)';
+  return [outputDir, '*', '*', GENERATED_RUN.test(parts[2]!) ? parts[2] : '(execução omitida)', parts[3]].join('/');
+}
+
 /** `checkpointRunId`: execução (checkpoint) a que esta sessão pertence; cada sessão exporta no próprio runId. */
 export type TreeRunMeta = { runId: string; startedAt: string; finishedAt: string; environment: AirEnvironment; checkpointRunId?: string };
 

@@ -26,6 +26,9 @@ export const API_METHODS = [
   'plan',
   'revealPlanNames',
   'exportPlanDetailed',
+  'inspectInventory',
+  'revealSelectionNames',
+  'previewProposals',
   'getSettings',
   'saveSettings',
 ] as const;

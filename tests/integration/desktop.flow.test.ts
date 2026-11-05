@@ -179,6 +179,254 @@ describe.runIf(process.platform === 'win32')('fluxo pela janela do aplicativo (d
     for (const name of SENSITIVE) expect(redactedPlan).not.toContain(name);
   }, TIMEOUT);
 
+  it('prévia de movimentações: nomes ocultos, revelados só com confirmação e ocultos de novo; nada é gravado', async () => {
+    await start({ root: TREE, pageSize: 30 });
+    await openChrome();
+    await go('Leitura');
+    await page.locator('#op-client').fill('Cliente Sintético');
+    await page.locator('#op-sector').fill('Setor Sintético');
+    await fill('tree', WIDE);
+    await page.locator('#start-tree').click();
+    await confirm();
+    await page.locator('#tree-result .notice').waitFor({ timeout: WAIT });
+    await page.getByRole('button', { name: 'Gravar inventário detalhado' }).last().click();
+    await confirm();
+    await page.locator('#message.ok').waitFor({ timeout: WAIT });
+
+    await go('Planejamento');
+    await page.locator('#plan-select option[value^="inv-"]').first().waitFor({ state: 'attached', timeout: WAIT });
+    await page.locator('#move-load:not([disabled])').click();
+    await page.locator('#move-inventory .notice', { hasText: 'ELEGÍVEL' }).waitFor({ timeout: WAIT });
+    await page.locator('#move-picker:not([hidden])').waitFor({ timeout: WAIT });
+    expect(await text('#move-inventory')).toContain('COMPLETA');
+
+    // HTML inteiro da tela: cobre opções, atributos, títulos e rótulos de acessibilidade.
+    const expectNoNames = async () => {
+      const html = await page.locator('#planning').evaluate((node) => node.outerHTML);
+      for (const name of SENSITIVE) expect(html).not.toContain(name);
+    };
+    await expectNoNames();
+
+    const before = (await files()).length;
+    // Sem a escolha do que fazer com a pasta, nada é presumido.
+    const options = () => page.locator('#move-source option').evaluateAll((list) => list.map((o) => ({ value: (o as HTMLOptionElement).value, text: o.textContent ?? '' })));
+    await page.getByRole('button', { name: 'Revelar nomes da seleção' }).click();
+    await page.locator('#confirm-no').click();
+    await expectNoNames();
+
+    await page.getByRole('button', { name: 'Revelar nomes da seleção' }).click();
+    await confirm();
+    await page.getByRole('button', { name: 'Ocultar nomes' }).waitFor({ timeout: WAIT });
+    const listed = await options();
+    const alfa = listed.findIndex((o) => o.text.includes('Alfa'));
+    const source = listed.slice(alfa).find((o) => o.text.includes('Planetas'))!.value;
+    const destination = listed.find((o) => o.text.includes('Beta'))!.value;
+
+    await page.locator('#move-source').selectOption(source);
+    await page.locator('#move-destination').selectOption(destination);
+    // A própria origem não é um destino possível.
+    expect(await page.locator(`#move-destination option[value="${source}"]`).evaluate((o) => (o as HTMLOptionElement).disabled)).toBe(true);
+    await page.locator('#move-generate').click();
+    await page.locator('#message.error', { hasText: 'o que fazer com a pasta' }).waitFor({ timeout: WAIT });
+
+    await page.locator('input[name="move-mode"][value="folder"]').check();
+    await page.locator('#move-generate').click();
+    await page.locator('#move-result .notice', { hasText: 'NÃO EXECUTÁVEIS' }).waitFor({ timeout: WAIT });
+    // Consolida na "Planetas" existente em Beta: o agrupamento e o arquivo, sem pasta duplicada.
+    expect(await page.locator('#move-result article.card').count()).toBe(2);
+    expect(await page.locator('#move-result article.card').first().innerText()).toContain('Consolidação');
+    for (const card of await page.locator('#move-result article.card').allInnerTexts()) expect(card).toContain('Não executável');
+    expect(await text('#move-result')).toContain('documento c.pdf');
+
+    await page.getByRole('button', { name: 'Ocultar nomes' }).click();
+    await page.getByRole('button', { name: 'Revelar nomes da seleção' }).waitFor({ timeout: WAIT });
+    await expectNoNames();
+    // A seleção continua pelos identificadores, com os nomes ocultos.
+    expect(await page.locator('#move-source').inputValue()).toBe(source);
+    await page.locator('#move-generate').click();
+    await page.locator('#move-result .notice', { hasText: 'NÃO EXECUTÁVEIS' }).waitFor({ timeout: WAIT });
+    await expectNoNames();
+
+    const summary = await text('#move-result');
+    for (const expected of ['Total de propostas', 'Prontas para revisão', 'Bloqueadas', 'Consolidações', 'Motivos de bloqueio: nenhum', 'Seleção desta prévia', 'all-ready', 'só agrupa: não libera']) expect(summary).toContain(expected);
+
+    // Corrigir a seleção invalida a prévia: destino, modo e origem.
+    const previewGone = () => page.locator('#move-result article.card').count();
+    const generate = async () => {
+      await page.locator('#move-generate').click();
+      await page.locator('#move-result .notice', { hasText: 'NÃO EXECUTÁVEIS' }).waitFor({ timeout: WAIT });
+    };
+    const otherFolder = listed.find((o) => o.text.includes('Gama'))!.value;
+    await page.locator('#move-destination').selectOption(otherFolder);
+    expect(await previewGone()).toBe(0);
+    await generate();
+    await page.locator('input[name="move-mode"][value="folder-contents"]').check();
+    expect(await previewGone()).toBe(0);
+    await generate();
+    const sibling = listed.find((o) => o.text.includes('Alfa'))!.value;
+    await page.locator('#move-source').selectOption(sibling);
+    expect(await previewGone()).toBe(0);
+    // Trocar a origem também limpa o modo: nada é presumido para a nova pasta.
+    expect(await page.locator('input[name="move-mode"]:checked').count()).toBe(0);
+
+    /** Resposta obsoleta: o pedido sai e a seleção muda no mesmo instante, antes de qualquer resposta. */
+    const settled = async () => {
+      await idle();
+      await page.evaluate(() => (window as unknown as { airOrganizer: { status(): Promise<unknown> } }).airOrganizer.status());
+    };
+    await page.locator('input[name="move-mode"][value="folder"]').check();
+    await page.evaluate(() => {
+      document.getElementById('move-generate')!.click();
+      const destination = document.getElementById('move-destination') as HTMLSelectElement;
+      destination.selectedIndex = 0;
+      destination.dispatchEvent(new Event('change'));
+    });
+    await settled();
+    expect(await previewGone()).toBe(0);
+
+    // Trocar de inventário invalida seleções, nomes e prévia, mesmo com um pedido em andamento.
+    await page.locator('#move-destination').selectOption(destination);
+    await generate();
+    await page.getByRole('button', { name: 'Revelar nomes da seleção' }).click();
+    await confirm();
+    await page.getByRole('button', { name: 'Ocultar nomes' }).waitFor({ timeout: WAIT });
+    await page.evaluate(() => {
+      document.getElementById('move-generate')!.click();
+      document.getElementById('plan-select')!.dispatchEvent(new Event('change'));
+    });
+    await settled();
+    expect(await previewGone()).toBe(0);
+    expect(await page.locator('#move-picker').isHidden()).toBe(true);
+    expect(await page.locator('#move-names').isHidden()).toBe(true);
+    await expectNoNames();
+
+    expect((await files()).length).toBe(before);
+    const actions = (await page.locator('#planning button').allInnerTexts()).join(' | ');
+    expect(actions).not.toMatch(/mover|excluir|apagar|renomear|mesclar|executar|aplicar/i);
+  }, TIMEOUT);
+
+  it('prévia com bloqueios: destaque, motivos, quadro da seleção, ordem segura e etiquetas, sem vazar nomes', async () => {
+    const CONFLICT_TREE = dir('root', 'Raizfic', [
+      dir('o', 'Fontefic', [dir('o25', 'Ciclofic', [{ id: 'a', name: 'ata.pdf', type: 'file' }, { id: 'b', name: 'lista.pdf', type: 'file' }])]),
+      dir('d', 'Alvofic', [dir('d25', 'Ciclofic', [{ id: 'e', name: 'ata.pdf', type: 'file' }])]),
+    ]);
+    const PRIVATE = ['Fontefic', 'Alvofic', 'Ciclofic', 'ata.pdf', 'lista.pdf', 'Raizfic'];
+    await start({ root: CONFLICT_TREE, pageSize: 30 });
+    await openChrome();
+    await go('Leitura');
+    await page.locator('#op-client').fill('Cliente Sintético');
+    await page.locator('#op-sector').fill('Setor Sintético');
+    await fill('tree', WIDE);
+    await page.locator('#start-tree').click();
+    await confirm();
+    await page.locator('#tree-result .notice').waitFor({ timeout: WAIT });
+    await page.getByRole('button', { name: 'Gravar inventário detalhado' }).last().click();
+    await confirm();
+    await page.locator('#message.ok').waitFor({ timeout: WAIT });
+
+    await go('Planejamento');
+    await page.locator('#plan-select option[value^="inv-"]').first().waitFor({ state: 'attached', timeout: WAIT });
+    await page.locator('#move-load:not([disabled])').click();
+    await page.locator('#move-picker:not([hidden])').waitFor({ timeout: WAIT });
+    const expectHidden = async () => {
+      // Só a prévia: o HTML dela cobre quadro, ordem, cartões, atributos e rótulos.
+      const html = await page.locator('#move-result').evaluate((node) => node.outerHTML);
+      for (const name of PRIVATE) expect(html).not.toContain(name);
+    };
+
+    // Texto da confirmação fala em pastas E arquivos.
+    await page.getByRole('button', { name: 'Revelar nomes da seleção' }).click();
+    await page.locator('#confirm').waitFor({ timeout: WAIT });
+    expect(await text('#confirm-body')).toMatch(/nomes de pastas e arquivos/);
+    await confirm();
+    await page.getByRole('button', { name: 'Ocultar nomes' }).waitFor({ timeout: WAIT });
+    const listed = await page.locator('#move-source option').evaluateAll((list) => list.map((o) => ({ value: (o as HTMLOptionElement).value, text: o.textContent ?? '' })));
+    const origem = listed.findIndex((o) => o.text.includes('Fontefic'));
+    const source = listed.slice(origem).find((o) => o.text.includes('Ciclofic'))!.value;
+    const destination = listed.find((o) => o.text.includes('Alvofic'))!.value;
+    const file = listed.find((o) => o.text.includes('lista.pdf'))!.value;
+    await page.getByRole('button', { name: 'Ocultar nomes' }).click();
+    await page.getByRole('button', { name: 'Revelar nomes da seleção' }).waitFor({ timeout: WAIT });
+
+    await page.locator('#move-source').selectOption(source);
+    await page.locator('#move-destination').selectOption(destination);
+    await page.locator('input[name="move-mode"][value="folder"]').check();
+    await page.locator('#move-generate').click();
+    await page.locator('#move-summary', { hasText: 'NÃO EXECUTÁVEIS' }).waitFor({ timeout: WAIT });
+
+    // Resumo: atenção, não sucesso; motivos reais do motor.
+    expect(await page.locator('#move-summary').getAttribute('class')).toContain('warn');
+    expect(await text('#move-summary')).toContain('COM BLOQUEIOS');
+    const summary = await text('#move-result');
+    expect(summary).toContain('Motivos de bloqueio');
+    expect(summary).toContain('Conflitos: mesmo nome no destino: 1');
+    expect(summary).not.toMatch(/Motivos de bloqueio: nenhum|Categorias de bloqueio: nenhuma/);
+
+    // Estados diferentes na aparência E no texto.
+    const blocked = page.locator('#move-result article.card[data-state="blocked"]');
+    const ready = page.locator('#move-result article.card[data-state="ready-for-review"]').last();
+    expect(await blocked.count()).toBe(1);
+    const borderOf = (card: typeof blocked) => card.evaluate((node) => getComputedStyle(node).borderLeftColor + getComputedStyle(node).borderLeftWidth);
+    expect(await borderOf(blocked)).not.toBe(await borderOf(ready));
+    const blockedText = await blocked.innerText();
+    expect(blockedText).toContain('⚠ Bloqueada (blocked)');
+    expect(blockedText).toContain('Não executável');
+    expect(blockedText).not.toContain('Pendente de revisão');
+    expect(blockedText).not.toMatch(/Apta para revisão/);
+    expect(await ready.innerText()).toContain('Pendente de revisão');
+    expect(await page.locator('#move-result article.card').first().innerText()).toContain('⚠ Parcialmente bloqueada');
+    // Nenhuma etiqueta apresenta proposta como aprovada, autorizada ou executável.
+    const tags = await page.locator('#move-result article.card .tag').allInnerTexts();
+    expect(tags.length).toBeGreaterThan(0);
+    for (const tag of tags) expect(tag).not.toMatch(/aprovad|autorizad|^execut/i);
+    expect(tags.filter((tag) => tag === 'Não executável')).toHaveLength(await page.locator('#move-result article.card').count());
+
+    // Quadro da seleção: inventário, origem, destino e modo, com nomes ocultos.
+    const box = await text('#move-selection');
+    expect(box).toContain('output/*/*/');
+    expect(box).toContain(`Pasta ${source}`);
+    expect(box).toContain(`Pasta ${destination}`);
+    expect(box).toContain('Levar a pasta para dentro do destino');
+
+    // Ordem segura legível, sem a operação bloqueada, com os identificadores só como referência.
+    const order = page.locator('#move-order li');
+    expect(await order.count()).toBe(2);
+    expect(await order.first().innerText()).toMatch(new RegExp(`^Consolidação \\(agrupamento\\): Pasta ${source}.*→ Pasta .*\\(M-[0-9a-f]{16}\\)$`));
+    const blockedId = await blocked.locator('.refs').innerText();
+    expect(await text('#move-order')).not.toContain(blockedId);
+    expect(await text('#move-order')).toContain('Arquivo:');
+    await expectHidden();
+
+    // Nomes revelados no quadro e na ordem; ocultar remove de ambos.
+    await page.getByRole('button', { name: 'Revelar nomes da seleção' }).click();
+    await confirm();
+    await page.getByRole('button', { name: 'Ocultar nomes' }).waitFor({ timeout: WAIT });
+    expect(await text('#move-selection')).toContain('Ciclofic');
+    expect(await text('#move-selection')).toContain('Alvofic');
+    expect(await text('#move-order')).toContain('lista.pdf');
+    await page.getByRole('button', { name: 'Ocultar nomes' }).click();
+    await page.getByRole('button', { name: 'Revelar nomes da seleção' }).waitFor({ timeout: WAIT });
+    await expectHidden();
+
+    // O quadro reflete quem gerou a prévia: mudar a seleção invalida a prévia e o quadro juntos.
+    await page.locator('input[name="move-mode"][value="folder-contents"]').check();
+    expect(await page.locator('#move-selection').count()).toBe(0);
+    expect(await page.locator('#move-result article.card').count()).toBe(0);
+    await page.locator('#move-generate').click();
+    await page.locator('#move-selection').waitFor({ timeout: WAIT });
+    expect(await text('#move-selection')).toContain('Consolidar o conteúdo da pasta no destino');
+
+    // Arquivo como origem: o modo não se aplica, e não há bloqueios nem aparência de atenção.
+    await page.locator('#move-source').selectOption(file);
+    expect(await page.locator('#move-selection').count()).toBe(0);
+    await page.locator('#move-generate').click();
+    await page.locator('#move-selection').waitFor({ timeout: WAIT });
+    expect(await text('#move-selection')).toContain('não se aplica');
+    expect(await page.locator('#move-summary').getAttribute('class')).toContain('ok');
+    expect(await text('#move-result')).toContain('Motivos de bloqueio: nenhum');
+    await expectHidden();
+  }, TIMEOUT);
+
   it('parada controlada: Chrome segue aberto, leitura parcial, plano recusado; retomada VERIFICADA completa e planejável', async () => {
     await start({ root: TREE, pageSize: 30, renderDelayMs: 350 });
     await openChrome();

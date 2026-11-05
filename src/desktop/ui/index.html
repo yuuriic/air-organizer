@@ -152,6 +152,30 @@
         </div>
       </div>
       <div id="plan-result"></div>
+      <div class="panel">
+        <h2>Prévia de movimentações</h2>
+        <p class="lead">Escolha a origem e o destino e veja o que seria proposto. Nada é executado nem gravado, e nenhuma proposta autoriza mover nada no AIR. Os nomes ficam ocultos até você pedir.</p>
+        <div class="row">
+          <button id="move-load" type="button" data-needs="idle">Analisar inventário selecionado</button>
+          <button id="move-names" type="button" hidden>Revelar nomes da seleção</button>
+        </div>
+        <div id="move-inventory"></div>
+        <div id="move-picker" hidden>
+          <div class="fields">
+            <label class="field">Origem (arquivo ou pasta)<select id="move-source" size="12"></select></label>
+            <label class="field">Destino (pasta)<select id="move-destination" size="12"></select></label>
+          </div>
+          <fieldset id="move-mode" hidden>
+            <legend>O que fazer com a pasta de origem</legend>
+            <label><input type="radio" name="move-mode" value="folder"> Levar a pasta para dentro do destino</label>
+            <label><input type="radio" name="move-mode" value="folder-contents"> Consolidar o conteúdo da pasta no destino</label>
+          </fieldset>
+          <div class="row">
+            <button id="move-generate" class="primary" type="button" data-needs="idle">Gerar prévia</button>
+          </div>
+        </div>
+      </div>
+      <div id="move-result"></div>
     </section>
 
     <section id="settings" class="screen" hidden>
